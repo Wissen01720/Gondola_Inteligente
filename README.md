@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-# Gondola_Inteligente
-=======
 # Scapder Vision — Prototipo
 
 Prototipo de escritorio para el reto de space management con visión
@@ -153,7 +150,45 @@ muestra el motivo en el log de la interfaz (no se congela ni truena).
 
 ---
 
-## 4. Privacidad por diseño (desde este primer módulo)
+## 4. Qué contiene el reporte `.json` de cada limpieza
+
+Cada vez que se limpia un video, junto al video de salida en
+`data/processed/` se genera un archivo con el mismo nombre y extensión
+`.json` (por ejemplo `mi_video_clean.json`). Ejemplo real de contenido:
+
+```json
+{
+  "frames_read": 500,
+  "frames_written": 480,
+  "black_frames_removed": 15,
+  "frozen_frames_removed": 5,
+  "output_fps": 30.0,
+  "output_resolution": [1280, 720],
+  "output_path": "data/processed/mi_video_clean.mp4",
+  "frame_mapping": [
+    {"clean_frame": 0, "original_frame": 0, "original_timestamp_sec": 0.0},
+    {"clean_frame": 1, "original_frame": 1, "original_timestamp_sec": 0.033},
+    {"clean_frame": 2, "original_frame": 4, "original_timestamp_sec": 0.133}
+  ]
+}
+```
+
+- Los primeros campos (`frames_read`, `frames_written`, etc.) son el
+  resumen general de la limpieza.
+- `frame_mapping` es la parte clave para las siguientes etapas del
+  pipeline: por cada frame que quedó en el video limpio, indica qué
+  posición y qué segundo tenía ese mismo contenido en el video
+  **original** (antes de quitar frames negros/congelados). Sin esto, un
+  evento detectado en el video limpio no se podría ubicar en el video
+  original de hasta 12 horas.
+- Si el video no tenía frames negros ni congelados, `frame_mapping`
+  simplemente queda 1 a 1 (`clean_frame` == `original_frame` en cada
+  fila) — se genera igual, por consistencia entre todos los videos
+  procesados.
+
+---
+
+## 5. Privacidad por diseño (desde este primer módulo)
 
 - Ni `video_loader.py` ni `video_cleaner.py` hacen reconocimiento facial,
   ni guardan ningún dato biométrico — solo metadatos técnicos (resolución,
@@ -165,7 +200,7 @@ muestra el motivo en el log de la interfaz (no se congela ni truena).
 
 ---
 
-## 5. Sugerencias para continuar el desarrollo
+## 6. Sugerencias para continuar el desarrollo
 
 El proyecto está pensado para que cada punto siguiente sea una pestaña
 nueva en `app/ui/main_window.py` y un módulo nuevo en `app/core/`, sin
@@ -230,4 +265,3 @@ reescribir lo ya construido.
 5. Dashboard consolidado.
 6. Motor de recomendación basado en reglas.
 7. Optimización edge (OpenVINO) como paso final de "productización".
->>>>>>> 43b543c (Agregar prototipo inicial de Scapder Vision)
