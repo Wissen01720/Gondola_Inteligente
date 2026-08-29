@@ -1,0 +1,9 @@
+PySide6>=6.6.0
+opencv-python>=4.9.0
+numpy>=1.26.0
+
+# Dependencias que se agregarán en las siguientes fases del reto
+# (detección de personas, tracking, pose estimation, dashboard):
+# ultralytics        # YOLOv8/v9 - detección y pose
+# lap                # requerido por trackers tipo ByteTrack
+# openvino           # optimización edge
