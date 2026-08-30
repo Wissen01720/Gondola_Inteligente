@@ -265,3 +265,260 @@ reescribir lo ya construido.
 5. Dashboard consolidado.
 6. Motor de recomendación basado en reglas.
 7. Optimización edge (OpenVINO) como paso final de "productización".
+
+---
+
+Módulo que realiza el análisis computacional en video: detecta personas,
+las sigue entre frames, estima la pose corporal, chequea zonas geométricas
+de interacción con estantes y genera eventos cuando se detectan acciones
+(alcanzar, sostener, tomar producto, devolver producto). Diseñado como
+una capa puramente computacional: sin Qt, sin interfaz — solo cálculos y
+eventos emitidos a través de un bus generalizado.
+
+---
+
+## 7. Qué se construyó (Módulo 2)
+
+Un pipeline de visión computacional con una arquitectura modular donde
+cada componente tiene una responsabilidad clara:
+
+```
+app/core/
+├── detector.py          # Detección de personas con YOLOv11 (clase 0 COCO)
+├── tracker.py           # Tracking persistente con ByteTrack integrado
+├── pose.py              # Estimación de pose corporal (17 keypoints COCO)
+├── zone.py              # Validación de zonas y cálculo de señales geométricas
+├── state_machine.py     # Máquina de estados: IDLE → REACHING → HOLDING → EVENTO
+├── frame_mapping.py     # Traducción de timestamps desde video limpio al original
+├── schemas.py           # Contratos Pydantic para validación de datos
+├── event_publisher.py   # Bus de eventos generalizado (archivo / stdout / WebSocket)
+├── pipeline.py          # Orquestador que corre todo el flujo frame a frame
+├── video_loader.py      # (reutilizado de Módulo 1)
+├── workers.py           # (reutilizado de Módulo 1)
+└── video_cleaner.py     # (reutilizado de Módulo 1)
+
+scripts/
+└── run_pipeline_debug.py    # Script visual de debug sin UI (dibuja bboxes, keypoints, zonas)
+
+tests/
+└── test_state_machine.py    # Tests unitarios de transiciones de estado
+```
+
+---
+
+## 8. Flujo funcional de este módulo (Módulo 2)
+
+1. **Cargar video limpio + mapeo de frames** → `pipeline.run(video_path)`
+   abre un archivo `.mp4` de `data/processed/` y carga el `.json` asociado
+   (que contiene el `frame_mapping` del Módulo 1 — dónde fue cada frame en
+   el video original).
+
+2. **Tracking de personas** → `tracker.track(frame, frame_index)` detecta
+   y sigue personas usando YOLOv11 + ByteTrack. Cada persona recibe un
+   `track_id` único que persiste a lo largo del video (se reinicia en cada
+   ejecución, no es identidad persistente entre sesiones).
+
+3. **Estimación de pose** → `pose_estimator.estimate(frame, tracked_people)`
+   calcula 17 keypoints COCO (muñecas, codos, hombros, caderas, etc.) y
+   los asocia a cada persona trackeada por proximidad de bounding box + IoU.
+
+4. **Chequeo geométrico de zona** → `check_zone_signal(pose, zones)` verifica:
+   - ¿Está la muñeca dentro del polígono de la zona? (`wrist_inside`)
+   - ¿Está el brazo extendido? (`arm_extended`, usando relación
+     distancia(muñeca, hombro) / distancia(hombro, codo) ≥ threshold)
+   - **Filtro de confianza**: ambos keypoints (muñeca y hombro) deben tener
+     confianza ≥ `MIN_KEYPOINT_CONFIDENCE` (0.3 por defecto) para ser válidos.
+
+5. **Máquina de estados** → `state_machine.process(zone_signals)` sigue la
+   interacción de cada persona con cada zona según este flujo:
+   - **IDLE** → si `wrist_inside=True` y `arm_extended=True`, transiciona a
+     **REACHING**.
+   - **REACHING** → si el brazo se mantiene extendido dentro, incrementa un
+     contador. Al alcanzar `MIN_FRAMES_REACHING_TO_HOLDING` (5 frames por
+     defecto), transiciona a **HOLDING**. **Detección de atasco**: si la
+     muñeca sigue dentro pero el brazo NO está extendido durante más de
+     `MAX_SECONDS_STUCK_REACHING` (1 segundo = ~30 frames a 30 fps), la
+     máquina resetea a IDLE sin emitir evento — evita falsos positivos.
+   - **HOLDING** → si la muñeca permanece dentro durante al menos
+     `MIN_FRAMES_HOLDING` (8 frames), y luego sale de la zona, emite un
+     evento con `action="taken"`.
+   - Pérdida de tracking: si una persona desaparece durante más de
+     `MAX_FRAMES_MISSING_TO_RESET` (10 frames), todos sus estados se
+     reinician a IDLE sin emitir eventos.
+
+6. **Traducción de timestamps** → `translate_to_original_timestamp()` usa el
+   `frame_mapping` del Módulo 1 para convertir el timestamp relativo al video
+   limpio al timestamp absoluto en el video original de 12 horas. Esto es
+   crítico para ubicar eventos en la timeline original.
+
+7. **Publicación de eventos** → `event_publisher.publish(event)` emite cada
+   evento (`InteractionEvent`) según el modo configurado:
+   - `"file"`: guarda JSON local en `data/events/` (respaldo persistente).
+   - `"stdout"`: imprime en consola (para debug).
+   - `"websocket"`: preparado para transporte final con Team 3 (aún no
+     implementado, placeholder de contrato).
+
+---
+
+## 9. Cómo correr (Módulo 2)
+
+**Script de debug visual (sin interfaz de usuario):**
+
+```bash
+python -m scripts.run_pipeline_debug --video data/processed/mi_video_clean.mp4
+```
+
+Visualiza en tiempo real:
+- Bounding boxes de personas detectadas, coloreadas por **estado de
+  interacción**: azul = IDLE, amarillo = REACHING, rojo = HOLDING.
+- Keypoints de pose superpuestos como **círculos amarillos**,
+  únicamente si superan el umbral de confianza (`MIN_KEYPOINT_CONFIDENCE`,
+  0.3 por defecto); los que no lo superan simplemente **no se dibujan**.
+- Polígonos de zonas siempre en verde.
+- Eventos de interacción impresos en consola a medida que ocurren.
+
+**Ejecutar tests unitarios:**
+
+```bash
+pytest tests/ -v
+```
+
+Verifica:
+- Transiciones correctas de máquina de estados (IDLE → REACHING → HOLDING).
+- Detección de atascos en REACHING (resetea a IDLE sin evento).
+- Pérdida de tracking y reset automático.
+- Independencia entre múltiples personas y zonas simultáneamente.
+
+---
+
+## 10. Qué contiene el `Event Object` (Módulo 2)
+
+Un objeto `InteractionEvent` serializado a JSON se ve así:
+
+```json
+{
+  "track_id": 42,
+  "zone_id": "shelf_A1",
+  "action": "taken",
+  "timestamp": 125.4,
+  "event_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+- `track_id` (int): identificador efímero de la persona en esta sesión de
+  video (reinicia en 0 para cada video, no es persistente entre sesiones).
+- `zone_id` (str): nombre único de la zona de góndola donde ocurrió la
+  interacción (ej: "shelf_A1", "shelf_B2"). Definido por el usuario en el
+  editor manual de zonas.
+- `action` (str, enum): tipo de interacción detectada:
+  - `"taken"`: persona extrajo producto de la zona (salió del estado HOLDING).
+  - Nota: por diseño actual, no se distingue "pick-up" vs "put-back" solo
+    con pose — se necesaría detectar producto o movimiento bidireccional. Por
+    ahora se emite `"taken"` como placeholder.
+- `timestamp` (float): segundos desde el inicio del video **original** (antes
+  de limpieza), alineado con la duración real de la cámara. Calculado usando
+  `frame_mapping` para reproducibilidad exacta.
+- `event_id` (str, UUID): identificador único del evento, generado al
+  instante. Útil para auditoría y deduplicación si un evento se publica a
+  múltiples destinos.
+
+Ejemplo de un archivo de log generado en `data/events/`:
+
+```json
+[
+  {"track_id": 1, "zone_id": "shelf_A1", "action": "taken", "timestamp": 12.5, "event_id": "..."},
+  {"track_id": 2, "zone_id": "shelf_A1", "action": "taken", "timestamp": 15.3, "event_id": "..."},
+  {"track_id": 3, "zone_id": "shelf_B2", "action": "taken", "timestamp": 18.7, "event_id": "..."}
+]
+```
+
+---
+
+## 11. Privacidad por diseño (Módulo 2)
+
+- **Sin reconocimiento facial**: el sistema solo calcula bounding boxes de
+  cuerpo completo y coordenadas numéricas de articulaciones (muñeca, codo,
+  hombro). No entrena ni usa modelos de identidad facial.
+- **Sin biometría**: no se guardan características biométricas (gait, altura,
+  forma corporal específica de la persona).
+- **Sin almacenamiento de imágenes**: los keypoints son coordenadas (x, y,
+  confidence), no se guardan crops de imagen, no se archivan rostros ni
+  siluetas.
+- **Track IDs efímeros**: los identificadores de persona se generan dinámicamente
+  durante la ejecución y se descartan al cerrar el video. No persisten entre
+  sesiones ni se pueden usar para re-identificar a la misma persona en otro
+  video (no hay base de datos de identidades).
+- **Timestamps traceable al original**: los eventos se pueden ubicar
+  exactamente en el video original, útil para auditoría y revisión manual en
+  caso de disputa o error del sistema.
+
+---
+
+## 12. Sugerencias para continuar el desarrollo (Módulo 2)
+
+### Corto plazo (siguiente iteración)
+
+- **Integración del transporte final con Team 3**: Los eventos están listos para
+  ser publicados. Actualmente se guardan localmente en `data/events/`. El paso
+  siguiente es implementar `WebSocketEventPublisher` como una subclase de
+  `EventPublisher` que envíe eventos en tiempo real a un servidor definido en
+  `config.py`. El contrato de datos (`InteractionEvent`) ya es agnóstico del
+  medio de transporte.
+
+- **"ROI Auto-Suggest" automático quedó fuera de alcance de esta iteración**: En
+  lugar de que el usuario dibuje manualmente cada zona, se podría entrenar un
+  modelo ligero para detectar estantes automáticamente en un frame de referencia
+  y sugerir los polígonos de zona. Por ahora, la única forma de definir zonas es
+  con la herramienta manual `ZoneManager` (editor gráfico en la UI del Módulo 1
+  — pendiente de implementar, pero el esquema de datos ya está listo).
+
+### Mediano plazo
+
+- **Distinción pick-up vs put-back**: actualmente todos los eventos se emiten
+  como `action="taken"`. Para distinguir si la persona **extrajo** o **devolvió**
+  el producto, se podría:
+  - Detectar el movimiento de la mano (ascendente = tomar, descendente = devolver).
+  - Usar una red clasificadora pequeña entrenada con anotaciones locales.
+  - Combinar con información de carrito / zona de compra cercana.
+
+- **Mejora de robustez en pose bajo oclusión**: si el estante ocluye parcialmente
+  al brazo, puede que los keypoints fallen. Se podría:
+  - Usar modelos de pose más robustos (YOLOv11-pose-large, MediaPipe).
+  - Implementar predicción de keypoints ocultos usando interpolación temporal.
+
+- **Multizona simultánea**: hoy cada persona puede interactuar con una zona a la
+  vez (por diseño del `state_machine`). Para permitir que una persona tenga
+  eventos simultáneos en dos estantes (ej: comparar precios), se necesaría
+  revisar la lógica de estado.
+
+### Largo plazo
+
+- **Dwell time + heatmaps**: usando `frame_mapping` y timestamps precisos,
+  calcular cuánto tiempo pasa una persona en cada zona y generar mapas de calor
+  de permanencia para identificar cuellos de botella.
+
+- **Análisis de patrones**: con un histórico de eventos, detectar patrones
+  anómalos (ej: misma persona, mismo producto, en segundos — posible hurto o
+  problema de reabastecimiento).
+
+- **Optimización edge con OpenVINO**: una vez validado, exportar modelos a
+  formato OpenVINO para que el pipeline corra en hardware modesto sin dependencia
+  de PyTorch en producción.
+
+- **Mapa de calor de flujo (heatmap de circulación general)**: el `Event Object`
+  de este módulo captura eventos discretos de interacción (`track_id`, `zone_id`,
+  `action`, `timestamp`), no la trayectoria continua de cada persona a lo largo
+  del video. Un heatmap de "dónde circula y dónde no la gente" (mencionado como
+  funcionalidad esperada en el reto original) requeriría capturar y agregar la
+  posición de cada persona en cada frame, un tipo de dato distinto que este
+  módulo no produce. **Pendiente**: confirmar con el equipo completo qué módulo
+  será responsable de capturar esa trayectoria continua, ya que por diseño actual
+  del pipeline ningún módulo la está calculando.
+
+- **Herramienta de dibujo visual de ROI**: Módulo 2 expone y consume el contrato
+  `Zone` (`zone_id`, `name`, `polygon`) a través de `ZoneManager`
+  (`app/core/zone.py`), incluyendo guardado/carga de polígonos en `data/zones/`,
+  pero la interfaz donde el usuario dibuja el polígono con clicks sobre un frame
+  es responsabilidad de la UI (Team 4). **Pendiente**: confirmar con Team 4 que el
+  formato de salida de su herramienta de dibujo coincide exactamente con el
+  esquema `Zone` definido en `app/core/schemas.py`.
