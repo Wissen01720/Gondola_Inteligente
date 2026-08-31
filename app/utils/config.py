@@ -1,3 +1,4 @@
+
 """
 Configuración global del proyecto Scapder Vision.
 Todos los parámetros ajustables viven aquí para no tocar código
@@ -67,11 +68,16 @@ MIN_FRAMES_HOLDING = 8                    # Frames mínimos en "holding" antes d
 MAX_FRAMES_MISSING_TO_RESET = 10          # Frames sin detección de esa persona antes de resetear su estado a "idle"
 MAX_SECONDS_STUCK_REACHING = 1.0          # Segundos con la muñeca dentro de la zona pero brazo no extendido antes de resetear a IDLE (evita "atascos")
 
+# --- Módulo 2: Trayectoria continua (heatmaps de circulación) ---
+TRAJECTORY_SAMPLE_EVERY_N_FRAMES = 1      # Publicar una PositionSample por persona cada N frames (1 = todos los frames)
+
 # --- Módulo 2: Publicación de eventos ---
-EVENT_PUBLISHER_MODE = "file"             # "file" | "stdout" | "websocket" (websocket aún no implementado, placeholder)
+EVENT_PUBLISHER_MODE = "file"             # "file" | "stdout" | "inprocess" (websocket descartado para MVP: ver docs/event_schema.md)
 EVENTS_LOCAL_LOG_PATH = str(DATA_DIR / "events") # Carpeta de respaldo local mientras no hay transporte confirmado con Team 3
+
+# --- Módulo 3: Almacenamiento de eventos (backend local) ---
+EVENT_STORE_DB_PATH = str(DATA_DIR / "scapder_events.db") # SQLite local para eventos + muestras de posición
 
 # Asegurar que existan los directorios
 Path(ZONES_STORAGE_PATH).mkdir(parents=True, exist_ok=True)
 Path(EVENTS_LOCAL_LOG_PATH).mkdir(parents=True, exist_ok=True)
-

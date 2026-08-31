@@ -5,7 +5,7 @@ from typing import List
 import numpy as np
 from ultralytics import YOLO
 
-from app.core.schemas import Detection
+from app.core.detection.schemas import Detection
 from app.utils.config import DETECTION_MODEL_NAME, DETECTION_CONF_THRESHOLD, DETECTION_IOU_THRESHOLD
 
 class PersonDetector:

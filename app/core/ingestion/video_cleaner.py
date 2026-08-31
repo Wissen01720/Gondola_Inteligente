@@ -20,7 +20,7 @@ from typing import Callable, Optional
 import cv2
 import numpy as np
 
-from app.core.video_loader import VideoInfo, VideoLoadError
+from app.core.ingestion.video_loader import VideoInfo, VideoLoadError
 from app.utils import config
 
 

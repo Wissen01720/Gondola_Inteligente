@@ -4,7 +4,7 @@ Máquina de estados para detectar eventos de interacción a partir de señales d
 from enum import Enum
 from typing import List, Dict, Tuple, Set
 
-from app.core.schemas import ZoneSignal, InteractionEvent
+from app.core.detection.schemas import ZoneSignal, InteractionEvent
 from app.utils.config import (
     MIN_FRAMES_REACHING_TO_HOLDING,
     MIN_FRAMES_HOLDING,

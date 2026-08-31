@@ -5,7 +5,7 @@ from typing import List, Optional
 import numpy as np
 from ultralytics import YOLO
 
-from app.core.schemas import PoseResult, Keypoint, TrackedPerson
+from app.core.detection.schemas import PoseResult, Keypoint, TrackedPerson
 from app.utils.config import POSE_MODEL_NAME, POSE_TRACK_MATCH_IOU_MIN, POSE_TRACK_MATCH_MAX_DIST_SQ
 
 class PoseEstimator:

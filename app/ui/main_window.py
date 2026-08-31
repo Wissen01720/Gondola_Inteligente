@@ -27,8 +27,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.video_loader import VideoInfo, VideoLoadError, extract_thumbnail, load_video
-from app.core.workers import VideoCleaningWorker
+from app.core.ingestion.video_loader import VideoInfo, VideoLoadError, extract_thumbnail, load_video
+from app.core.ingestion.workers import VideoCleaningWorker
+from app.ui.zone_editor_tab import ZoneEditorTab
 from app.utils import config
 
 
@@ -239,9 +240,10 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget()
         tabs.addTab(VideoIngestTab(), "1. Carga y Limpieza de Video")
+        tabs.addTab(ZoneEditorTab(), "2. Edición de Zonas (ROI)")
         # Futuras pestañas (ya con el espacio reservado en la arquitectura):
-        # tabs.addTab(DetectionTab(), "2. Detección y Tracking")
-        # tabs.addTab(InteractionTab(), "3. Eventos de Interacción")
-        # tabs.addTab(DashboardTab(), "4. Dashboard de Métricas")
+        # tabs.addTab(DetectionTab(), "3. Detección y Tracking")
+        # tabs.addTab(InteractionTab(), "4. Eventos de Interacción")
+        # tabs.addTab(DashboardTab(), "5. Dashboard de Métricas")
 
         self.setCentralWidget(tabs)

@@ -11,7 +11,7 @@ from typing import List
 import numpy as np
 from ultralytics import YOLO
 
-from app.core.schemas import TrackedPerson
+from app.core.detection.schemas import TrackedPerson
 from app.utils.config import DETECTION_MODEL_NAME, DETECTION_CONF_THRESHOLD, DETECTION_IOU_THRESHOLD, TRACKER_CONFIG
 
 class PersonTracker:

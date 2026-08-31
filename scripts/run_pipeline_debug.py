@@ -1,19 +1,19 @@
 """
 Script de depuración visual para el pipeline de detección de Scapder Vision (Módulo 2).
 Permite validar la detección, tracking, estimación de pose y estados en video real sin la UI de PySide6.
+Usa `VideoFileFrameSource` (carga el frame_mapping del sidecar y traduce timestamps automáticamente).
 """
 import argparse
-import json
 from pathlib import Path
 import cv2
 import numpy as np
 
-from app.core.tracker import PersonTracker
-from app.core.pose import PoseEstimator
-from app.core.zone import ZoneManager, check_zone_signal
-from app.core.state_machine import InteractionStateMachine, InteractionState
-from app.core.event_publisher import LocalEventPublisher
-from app.core.frame_mapping import translate_to_original_timestamp
+from app.core.ingestion.frame_source import VideoFileFrameSource
+from app.core.detection.tracker import PersonTracker
+from app.core.detection.pose import PoseEstimator
+from app.core.detection.zone import ZoneManager, check_zone_signal
+from app.core.detection.state_machine import InteractionStateMachine, InteractionState
+from app.core.detection.event_publisher import LocalEventPublisher
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Validación visual del pipeline de detección.")
@@ -28,21 +28,9 @@ def parse_args():
 def main():
     args = parse_args()
     video_path = Path(args.video)
-    if not video_path.exists():
-        print(f"Error: No se encontró el video {video_path}")
-        return
 
-    # Intentar cargar el frame mapping
-    json_path = video_path.with_suffix(".json")
-    frame_mapping = []
-    if json_path.exists():
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                report_data = json.load(f)
-                frame_mapping = report_data.get("frame_mapping", [])
-            print(f"Cargado frame mapping desde: {json_path}")
-        except Exception as e:
-            print(f"No se pudo cargar el frame mapping: {e}")
+    # La framemapping del frame_mapping (sidecar .json) la maneja la fuente
+    source = VideoFileFrameSource(video_path)
 
     # Inicializar componentes del pipeline (excepto state_machine que requiere fps)
     tracker = PersonTracker()
@@ -53,21 +41,19 @@ def main():
     zones = zone_manager.load_zones()
     print(f"Zonas cargadas: {[z.name for z in zones]}")
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        print(f"Error al abrir el video: {video_path}")
-        return
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    fps = source.fps
     # Instanciar state_machine con fps real del video
     state_machine = InteractionStateMachine(fps=fps)
     cv2.namedWindow("Scapder Vision - Debug Pipeline", cv2.WINDOW_NORMAL)
 
     frame_index = 0
     while True:
-        ret, frame = cap.read()
-        if not ret:
+        sample = source.next_frame()
+        if sample is None:
             break
+
+        frame = sample.frame
+        frame_index = sample.frame_index
 
         # 1. Ejecutar tracking de personas
         tracked_people = tracker.track(frame, frame_index)
@@ -84,12 +70,9 @@ def main():
         # 4. Procesar señales en la máquina de estados
         events = state_machine.process(all_signals)
 
-        # 5. Traducir y publicar eventos
+        # 5. Traducir y publicar eventos (timestamp ya traducido por la fuente)
         for event in events:
-            if frame_mapping:
-                event.timestamp = translate_to_original_timestamp(frame_index, frame_mapping)
-            else:
-                event.timestamp = frame_index / fps
+            event.timestamp = sample.timestamp_sec
             event_publisher.publish(event)
 
         # --- DIBUJADO DE DEPURACIÓN (Visualización local) ---
@@ -210,7 +193,7 @@ def main():
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
-    cap.release()
+    source.close()
     cv2.destroyAllWindows()
     print(f"Depuración terminada. Se procesaron {frame_index} frames.")
 

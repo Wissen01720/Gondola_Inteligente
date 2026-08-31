@@ -2,8 +2,8 @@
 Tests unitarios para la máquina de estados de interacción.
 """
 import pytest
-from app.core.schemas import ZoneSignal
-from app.core.state_machine import InteractionStateMachine, InteractionState
+from app.core.detection.schemas import ZoneSignal
+from app.core.detection.state_machine import InteractionStateMachine, InteractionState
 from app.utils.config import (
     MIN_FRAMES_REACHING_TO_HOLDING,
     MIN_FRAMES_HOLDING,

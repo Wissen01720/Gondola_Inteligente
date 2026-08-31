@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List
 from shapely.geometry import Point, Polygon
 
-from app.core.schemas import Zone, ZoneSignal, PoseResult, Keypoint
+from app.core.detection.schemas import Zone, ZoneSignal, PoseResult, Keypoint
 from app.utils.config import ZONES_STORAGE_PATH, ARM_EXTENSION_MIN_RATIO, MIN_KEYPOINT_CONFIDENCE
 
 class ZoneManager:
