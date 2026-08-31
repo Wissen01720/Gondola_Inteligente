@@ -1,0 +1,114 @@
+"""
+Script de ayuda para dibujar zonas de góndola haciendo click (temporal).
+
+Permite definir zonas manualmente sobre el primer frame de un video hasta que
+Team 4 provea la herramienta real. No la reemplaza.
+
+Uso:
+    uv run python -m scripts.draw_zone_helper --video data/processed/<archivo>.mp4 \
+        --zone-id zone_1 --name "Estanteria Principal" --zone-type product
+
+Instrucciones:
+    - Click izquierdo: agrega un punto del polígono (en orden).
+    - 's' (save): guarda la zona si hay al menos 3 puntos.
+    - 'r' (reset): borra los puntos capturados y permite empezar de nuevo.
+    - 'q' (quit): cierra sin guardar.
+"""
+import argparse
+from pathlib import Path
+
+import cv2
+
+from app.core.schemas import Zone
+from app.core.zone import ZoneManager
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Dibuja zonas de góndola por click sobre el primer frame del video.")
+    parser.add_argument("--video", type=str, required=True, help="Ruta al video limpio (.mp4).")
+    parser.add_argument("--zone-id", type=str, required=True, help="Identificador de la zona (ej. zone_1).")
+    parser.add_argument("--name", type=str, required=True, help="Nombre descriptivo de la zona.")
+    parser.add_argument("--zone-type", type=str, default="product", help="Tipo de zona (por defecto: product).")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    video_path = Path(args.video)
+    if not video_path.exists():
+        print(f"Error: No se encontró el video {video_path}")
+        return
+    video_id = video_path.stem
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        print(f"Error: No se pudo abrir el video {video_path}")
+        return
+
+    ret, frame = cap.read()
+    cap.release()
+    if not ret:
+        print("Error: No se pudo extraer el primer frame del video.")
+        return
+
+    canvas = frame.copy()
+    points = []
+    window_name = f"Dibujar zona: {args.name}"
+
+    def redraw():
+        nonlocal canvas
+        canvas = frame.copy()
+        for i, (x, y) in enumerate(points):
+            cv2.circle(canvas, (x, y), 5, (0, 0, 255), -1)
+            if i > 0:
+                cv2.line(canvas, points[i - 1], (x, y), (0, 255, 0), 2)
+            cv2.putText(canvas, str(i + 1), (x + 8, y - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        overlay_text = f"Puntos: {len(points)} | click=agregar, s=guardar, r=reset, q=salir"
+        cv2.putText(canvas, overlay_text, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.imshow(window_name, canvas)
+
+    def on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            points.append((int(x), int(y)))
+            redraw()
+
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(window_name, on_mouse)
+    redraw()
+
+    saved_path = None
+    while True:
+        key = cv2.waitKey(20) & 0xFF
+        if key == ord("s"):
+            if len(points) < 3:
+                print(f"Se necesitan al menos 3 puntos para guardar la zona (tienes {len(points)}).")
+                continue
+            zone = Zone(
+                zone_id=args.zone_id,
+                video_id=video_id,
+                name=args.name,
+                polygon=points,
+            )
+            manager = ZoneManager()
+            saved_path = manager.save_zone(zone)
+            print(f"Zona guardada en: {saved_path}")
+        elif key == ord("r"):
+            points.clear()
+            redraw()
+            print("Puntos borrados. Empieza de nuevo.")
+        elif key == ord("q"):
+            break
+
+    cv2.destroyAllWindows()
+
+    if saved_path is not None:
+        print(f"Archivo de zona guardado en: {saved_path}")
+    else:
+        print("No se guardó ninguna zona.")
+
+
+if __name__ == "__main__":
+    main()

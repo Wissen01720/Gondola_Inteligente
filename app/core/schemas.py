@@ -35,6 +35,7 @@ class PoseResult(BaseModel):
 class Zone(BaseModel):
     """Geometría de una zona de la góndola."""
     zone_id: str
+    video_id: str
     name: str
     polygon: List[Tuple[float, float]]  # Puntos (x, y) que cierran la zona
 

@@ -55,8 +55,9 @@ class DetectionPipeline:
             if not self.frame_mapping:
                 print("Advertencia: Ejecutando sin mapeo de frames. Los timestamps serán aproximados al frame rate del video limpio.")
 
-        # Cargar las zonas
-        zones = self.zone_manager.load_zones()
+        # Cargar las zonas del video actual (nombre del archivo sin extensión)
+        video_id = video_path_obj.stem
+        zones = self.zone_manager.load_zones(video_id)
         if not zones:
             print(f"Advertencia: No hay zonas de góndola definidas en {self.zone_manager.storage_path}")
 

@@ -50,7 +50,7 @@ def main():
     zone_manager = ZoneManager()
     event_publisher = LocalEventPublisher(mode="stdout")
 
-    zones = zone_manager.load_zones()
+    zones = zone_manager.load_zones(video_path.stem)
     print(f"Zonas cargadas: {[z.name for z in zones]}")
 
     cap = cv2.VideoCapture(str(video_path))

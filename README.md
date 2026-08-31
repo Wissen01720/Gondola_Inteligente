@@ -522,3 +522,54 @@ Ejemplo de un archivo de log generado en `data/events/`:
   es responsabilidad de la UI (Team 4). **Pendiente**: confirmar con Team 4 que el
   formato de salida de su herramienta de dibujo coincide exactamente con el
   esquema `Zone` definido en `app/core/schemas.py`.
+
+## 13. Herramienta temporal para dibujar zonas (Módulo 2)
+
+### Qué es y para qué sirve
+
+`scripts/draw_zone_helper.py` es una herramienta temporal de línea de comandos
+para definir manualmente las zonas de góndola (ROI) sobre el **primer frame** de
+un video, mediante clicks, mientras Team 4 no tiene lista su herramienta visual
+de dibujo en la UI. **No la reemplaza**: solo habilita temporalmente la capacidad
+de dibujar zonas para poder probar el Módulo 2 mientras tanto.
+
+### Comando de uso
+
+```bash
+uv run python -m scripts.draw_zone_helper --video "data/processed/<archivo>.mp4" --zone-id zone_1 --name "Estanteria Principal" --zone-type product
+```
+
+### Comando para visualizar la zona dibujada
+
+Una vez guardada la zona, corre el pipeline de debug sobre el mismo video para confirmar visualmente que quedó bien ajustada al estante:
+
+```bash
+uv run python -m scripts.run_pipeline_debug --video "data/processed/<archivo>.mp4"
+```
+
+Deberías ver el polígono verde dibujado sobre el frame, en el lugar donde hiciste los clics. Si hay más de un estante en el mismo video, repite el comando de dibujo (arriba) una vez por cada estante, usando un `--zone-id` distinto en cada ejecución (ej. `zone_1`, `zone_2`) — nunca intentes dibujar dos zonas en una sola ejecución conectando sus puntos entre sí, porque el polígono resultante se cruza a sí mismo y no representa correctamente ninguna de las dos zonas.
+
+### Controles
+
+- **Click izquierdo**: agrega un punto del polígono, en orden (cada click se
+  dibuja sobre la imagen para dar feedback visual inmediato).
+- **'s' (save)**: guarda la zona (requiere un mínimo de 3 puntos).
+- **'r' (reset)**: borra los puntos capturados hasta ahora y permite empezar de
+  nuevo, sin cerrar la ventana.
+- **'q' (quit)**: cierra sin guardar (o después de guardar, para terminar).
+
+### Regla importante de uso
+
+Cada estante/zona física debe dibujarse en una ejecución **SEPARADA** del script,
+con un `--zone-id` **distinto** cada vez (ej. `zone_1` para un estante, `zone_2`
+para otro). **Nunca** se debe intentar dibujar dos zonas distintas en una sola
+ejecución conectando sus puntos en un mismo polígono continuo: el resultado sería
+una figura que se cruza a sí misma y no representa correctamente ninguna de las
+dos zonas.
+
+### Dónde queda guardado
+
+Cada zona se guarda como `data/zones/<video_id>/<zone_id>.json`, donde
+`<video_id>` es el nombre del archivo de video sin extensión. Así las zonas
+quedan independientes por video y no se mezclan entre distintas
+grabaciones/tiendas.
