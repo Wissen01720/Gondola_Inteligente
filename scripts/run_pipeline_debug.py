@@ -5,6 +5,7 @@ Permite validar la detección, tracking, estimación de pose y estados en video 
 import argparse
 import json
 from pathlib import Path
+import time
 import cv2
 import numpy as np
 
@@ -14,6 +15,9 @@ from app.core.zone import ZoneManager, check_zone_signal
 from app.core.state_machine import InteractionStateMachine, InteractionState
 from app.core.event_publisher import LocalEventPublisher
 from app.core.frame_mapping import translate_to_original_timestamp
+from app.core.position import estimate_foot_position
+from app.core.presence import DwellTracker
+from app.core.staff import StaffZoneTracker
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Validación visual del pipeline de detección.")
@@ -61,9 +65,12 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     # Instanciar state_machine con fps real del video
     state_machine = InteractionStateMachine(fps=fps)
+    dwell_tracker = DwellTracker()
+    staff_tracker = StaffZoneTracker()
     cv2.namedWindow("Scapder Vision - Debug Pipeline", cv2.WINDOW_NORMAL)
 
     frame_index = 0
+    start_time = time.perf_counter()
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -74,6 +81,25 @@ def main():
 
         # 2. Estimar Pose
         pose_results = pose_estimator.estimate(frame, frame_index, tracked_people)
+
+        # 2.5 Calcular timestamp una sola vez por frame
+        if frame_mapping:
+            current_timestamp = translate_to_original_timestamp(frame_index, frame_mapping)
+        else:
+            current_timestamp = frame_index / fps
+
+        # 2.6 Estimar posición de pies, detectar staff y medir dwell time
+        pose_by_track = {p.track_id: p for p in pose_results}
+        for person in tracked_people:
+            pose_o = pose_by_track.get(person.track_id)
+            pos = estimate_foot_position(person, pose_o, frame_index, current_timestamp)
+            is_emp = staff_tracker.update(pos, zones)
+            pos.is_employee = is_emp
+            event_publisher.publish(pos)
+            dwell_records = dwell_tracker.update(pos, zones, current_timestamp)
+            for dr in dwell_records:
+                dr.is_employee = staff_tracker.is_employee(dr.track_id)
+                event_publisher.publish(dr)
 
         # 3. Evaluar señales de zonas
         all_signals = []
@@ -86,27 +112,24 @@ def main():
 
         # 5. Traducir y publicar eventos
         for event in events:
-            if frame_mapping:
-                event.timestamp = translate_to_original_timestamp(frame_index, frame_mapping)
-            else:
-                event.timestamp = frame_index / fps
+            event.timestamp = current_timestamp
+            event.is_employee = staff_tracker.is_employee(event.track_id)
             event_publisher.publish(event)
 
         # --- DIBUJADO DE DEPURACIÓN (Visualización local) ---
-        # A. Dibujar zonas
+        # A. Dibujar zonas (verde para product, morado para staff)
         for zone in zones:
             if len(zone.polygon) >= 3:
                 pts = np.array(zone.polygon, dtype=np.int32)
-                # Dibujar polígono en verde
-                cv2.polylines(frame, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
-                # Colocar el nombre de la zona
+                zone_color = (128, 0, 128) if zone.zone_type == "staff" else (0, 255, 0)
+                cv2.polylines(frame, [pts], isClosed=True, color=zone_color, thickness=2)
                 cv2.putText(
                     frame,
                     zone.name,
                     (int(zone.polygon[0][0]), int(zone.polygon[0][1]) - 10),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
-                    (0, 255, 0),
+                    zone_color,
                     2,
                 )
 
@@ -202,6 +225,13 @@ def main():
                     2
                 )
 
+        # D. Dibujar posición de pies estimada (puntos por source)
+        for person in tracked_people:
+            pose_o = pose_by_track.get(person.track_id)
+            pos = estimate_foot_position(person, pose_o, frame_index, current_timestamp)
+            dot_color = (0, 200, 0) if pos.source == "ankle_keypoint" else (0, 128, 255)
+            cv2.circle(frame, (int(pos.x), int(pos.y)), 5, dot_color, -1)
+
         # Mostrar frame
         cv2.imshow("Scapder Vision - Debug Pipeline", frame)
         frame_index += 1
@@ -212,7 +242,14 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
+    total_time = time.perf_counter() - start_time
+    avg_fps = (frame_index / total_time) if total_time > 0 else 0.0
     print(f"Depuración terminada. Se procesaron {frame_index} frames.")
+    print(f"Tiempo total de procesamiento: {total_time:.2f} s.")
+    print(f"FPS promedio de procesamiento: {avg_fps:.2f}")
+    print("NOTA: este FPS incluye el overhead de dibujo (cv2.polylines, cv2.putText,")
+    print("cv2.imshow) y la espera de cv2.waitKey; NO es el FPS puro de inferencia.")
+    print("Usar como referencia de 'viabilidad edge' solo a titulo orientativo.")
 
 if __name__ == "__main__":
     main()

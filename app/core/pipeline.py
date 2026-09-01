@@ -12,6 +12,9 @@ from app.core.zone import ZoneManager, check_zone_signal
 from app.core.state_machine import InteractionStateMachine
 from app.core.event_publisher import EventPublisher
 from app.core.frame_mapping import translate_to_original_timestamp
+from app.core.position import estimate_foot_position
+from app.core.presence import DwellTracker
+from app.core.staff import StaffZoneTracker
 
 class DetectionPipeline:
     """Orquesta el flujo de tracking, pose, validación de zonas, traducción y envío de eventos."""
@@ -24,6 +27,8 @@ class DetectionPipeline:
         state_machine: InteractionStateMachine,
         event_publisher: EventPublisher,
         frame_mapping: Optional[List[Dict]] = None,
+        dwell_tracker: Optional[DwellTracker] = None,
+        staff_tracker: Optional[StaffZoneTracker] = None,
     ):
         self.tracker = tracker
         self.pose_estimator = pose_estimator
@@ -31,6 +36,8 @@ class DetectionPipeline:
         self.state_machine = state_machine
         self.event_publisher = event_publisher
         self.frame_mapping = frame_mapping
+        self.dwell_tracker = dwell_tracker or DwellTracker()
+        self.staff_tracker = staff_tracker or StaffZoneTracker()
 
     def run(self, video_path: str) -> None:
         """
@@ -82,6 +89,30 @@ class DetectionPipeline:
                 # 2. Estimar Pose
                 pose_results = self.pose_estimator.estimate(frame, frame_index, tracked_people)
 
+                # 2.5 Calcular timestamp una sola vez por frame
+                if self.frame_mapping:
+                    current_timestamp = translate_to_original_timestamp(frame_index, self.frame_mapping)
+                else:
+                    current_timestamp = frame_index / fps
+
+                # 2.6 Estimar posición de pies, detectar staff y medir dwell time
+                pose_by_track = {p.track_id: p for p in pose_results}
+                for person in tracked_people:
+                    pose_o = pose_by_track.get(person.track_id)
+                    position_sample = estimate_foot_position(
+                        person, pose_o, frame_index, current_timestamp,
+                    )
+                    is_emp = self.staff_tracker.update(position_sample, zones)
+                    position_sample.is_employee = is_emp
+                    self.event_publisher.publish(position_sample)
+
+                    dwell_records = self.dwell_tracker.update(
+                        position_sample, zones, current_timestamp,
+                    )
+                    for dwell_record in dwell_records:
+                        dwell_record.is_employee = self.staff_tracker.is_employee(dwell_record.track_id)
+                        self.event_publisher.publish(dwell_record)
+
                 # 3. Calcular señales de zona
                 all_signals = []
                 for pose in pose_results:
@@ -93,12 +124,8 @@ class DetectionPipeline:
 
                 # 5. Traducir timestamps y publicar eventos
                 for event in events:
-                    if self.frame_mapping:
-                        event.timestamp = translate_to_original_timestamp(frame_index, self.frame_mapping)
-                    else:
-                        # Fallback simple usando FPS si no hay mapping de frames
-                        event.timestamp = frame_index / fps
-                    
+                    event.timestamp = current_timestamp
+                    event.is_employee = self.staff_tracker.is_employee(event.track_id)
                     self.event_publisher.publish(event)
 
                 frame_index += 1

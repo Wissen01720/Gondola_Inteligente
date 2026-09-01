@@ -56,6 +56,7 @@ class PoseEstimator:
                 # 5: left_shoulder, 6: right_shoulder
                 # 7: left_elbow,    8: right_elbow
                 # 9: left_wrist,    10: right_wrist
+                # 15: left_ankle,   16: right_ankle
                 
                 left_shoulder = Keypoint(x=kps[5][0], y=kps[5][1], confidence=confs[5])
                 right_shoulder = Keypoint(x=kps[6][0], y=kps[6][1], confidence=confs[6])
@@ -63,6 +64,8 @@ class PoseEstimator:
                 right_elbow = Keypoint(x=kps[8][0], y=kps[8][1], confidence=confs[8])
                 left_wrist = Keypoint(x=kps[9][0], y=kps[9][1], confidence=confs[9])
                 right_wrist = Keypoint(x=kps[10][0], y=kps[10][1], confidence=confs[10])
+                left_ankle = Keypoint(x=kps[15][0], y=kps[15][1], confidence=confs[15])
+                right_ankle = Keypoint(x=kps[16][0], y=kps[16][1], confidence=confs[16])
 
                 pose_results.append(
                     PoseResult(
@@ -74,6 +77,8 @@ class PoseEstimator:
                         right_elbow=right_elbow,
                         left_shoulder=left_shoulder,
                         right_shoulder=right_shoulder,
+                        left_ankle=left_ankle,
+                        right_ankle=right_ankle,
                     )
                 )
 

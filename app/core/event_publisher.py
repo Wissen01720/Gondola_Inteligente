@@ -9,15 +9,15 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-from app.core.schemas import InteractionEvent
+from pydantic import BaseModel
 from app.utils.config import EVENT_PUBLISHER_MODE, EVENTS_LOCAL_LOG_PATH
 
 class EventPublisher(ABC):
     """Interfaz base para el publicador de eventos."""
 
     @abstractmethod
-    def publish(self, event: InteractionEvent) -> None:
-        """Publica el evento de interacción."""
+    def publish(self, event: BaseModel) -> None:
+        """Publica un evento serializable a Pydantic."""
         pass
 
 
@@ -39,7 +39,7 @@ class LocalEventPublisher(EventPublisher):
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.session_file = self.log_dir / f"events_session_{timestamp_str}.jsonl"
 
-    def publish(self, event: InteractionEvent) -> None:
+    def publish(self, event: BaseModel) -> None:
         """Publica el evento serializado a stdout o archivo local jsonl."""
         event_data = event.model_dump()
         # Asegurarse de que el event_id sea un string y no falte

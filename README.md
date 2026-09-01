@@ -289,6 +289,10 @@ app/core/
 ├── pose.py              # Estimación de pose corporal (17 keypoints COCO)
 ├── zone.py              # Validación de zonas y cálculo de señales geométricas
 ├── state_machine.py     # Máquina de estados: IDLE → REACHING → HOLDING → EVENTO
+├── position.py          # Estimación híbrida de posición de pies (tobillos / bbox)
+├── presence.py          # Dwell time: tiempo de permanencia por zona de producto
+├── roi_suggest.py       # Sugerencia automática de zonas por detección de bordes (opcional)
+├── staff.py             # Detección heurística de empleados por zona staff
 ├── frame_mapping.py     # Traducción de timestamps desde video limpio al original
 ├── schemas.py           # Contratos Pydantic para validación de datos
 ├── event_publisher.py   # Bus de eventos generalizado (archivo / stdout / WebSocket)
@@ -298,10 +302,13 @@ app/core/
 └── video_cleaner.py     # (reutilizado de Módulo 1)
 
 scripts/
-└── run_pipeline_debug.py    # Script visual de debug sin UI (dibuja bboxes, keypoints, zonas)
+├── run_pipeline_debug.py    # Script visual de debug sin UI (dibuja bboxes, keypoints, zonas)
+└── draw_zone_helper.py      # Herramienta temporal para dibujar zonas por click
 
 tests/
-└── test_state_machine.py    # Tests unitarios de transiciones de estado
+├── test_state_machine.py    # Tests unitarios de transiciones de estado
+├── test_presence.py         # Tests unitarios de dwell time
+└── test_staff.py            # Tests unitarios de detección heurística de staff
 ```
 
 ---
@@ -360,6 +367,45 @@ tests/
 
 ---
 
+## 8.5. Nuevos tipos de evento (Módulo 2 — Extensión)
+
+### PositionSample
+
+Cada frame, por cada persona trackeada, se genera un `PositionSample` con la mejor
+estimación disponible de **dónde toca el suelo** (coordenadas de píxel del frame de
+cámara, no metros reales del piso de la tienda). Dos fuentes posibles:
+
+- **`ankle_keypoint`** (verde en debug): usa los tobillos COCO si la pose fue
+  detectada con confianza suficiente. Más preciso pero no siempre disponible.
+- **`bbox_bottom_center`** (naranja en debug): centro inferior del bounding box.
+  Respaldo cuando la pose no se detectó o los tobillos no superan el umbral.
+
+`PositionSample` alimenta el futuro heatmap de circulación (Módulo 4). Las
+coordenadas son en píxeles del frame de cámara, no en metros reales del piso —
+convertir a coordenadas reales requeriría calibración de cámara por instalación,
+fuera de alcance de este MVP.
+
+### DwellRecord
+
+Mide **tiempo de permanencia** frente a una zona de producto (diferencia explícita
+con `InteractionEvent`: dwell time mide presencia, no interacción física con el
+producto). Se genera un `DwellRecord` por cada vez que una persona **sale** de una
+zona product, incluyendo `entry_timestamp`, `exit_timestamp` y `duration_sec`.
+
+Zonas `zone_type="staff"` se ignoran para dwell time — no tiene sentido medir
+"cuánto tiempo pasó un empleado frente a un producto" con este mecanismo.
+
+### Detección heurística de empleados
+
+El sistema marca como empleado a cualquier persona que haya estado dentro de una
+zona con `zone_type="staff"` en alguna parte del video. El marcado es **"sticky"**
+por sesión: una vez marcado como empleado, se queda así el resto del video (una
+persona no dejaría de ser empleado por moverse por la tienda). Es puramente
+geométrica (¿está el punto de pies dentro del polígono staff?), no reconocimiento
+de personas — no hay ningún dato biométrico involucrado.
+
+---
+
 ## 9. Cómo correr (Módulo 2)
 
 **Script de debug visual (sin interfaz de usuario):**
@@ -397,14 +443,19 @@ Un objeto `InteractionEvent` serializado a JSON se ve así:
 
 ```json
 {
+  "event_type": "interaction",
   "track_id": 42,
   "zone_id": "shelf_A1",
   "action": "taken",
   "timestamp": 125.4,
-  "event_id": "550e8400-e29b-41d4-a716-446655440000"
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "is_employee": false
 }
 ```
 
+- `event_type` (str, enum): discriminador del tipo de evento. Para interacciones
+  siempre vale `"interaction"`. Permite a cualquier consumidor del archivo de
+  eventos filtrar por tipo sin inferirlo por la presencia de campos.
 - `track_id` (int): identificador efímero de la persona en esta sesión de
   video (reinicia en 0 para cada video, no es persistente entre sesiones).
 - `zone_id` (str): nombre único de la zona de góndola donde ocurrió la
@@ -421,15 +472,22 @@ Un objeto `InteractionEvent` serializado a JSON se ve así:
 - `event_id` (str, UUID): identificador único del evento, generado al
   instante. Útil para auditoría y deduplicación si un evento se publica a
   múltiples destinos.
+- `is_employee` (bool): indica si la persona que generó el evento fue
+  clasificada como empleado (por su paso por una zona `staff`). `false` por
+  defecto.
 
-Ejemplo de un archivo de log generado en `data/events/`:
+Ejemplo de un archivo de log generado en `data/events/`. El nombre real del
+archivo es `events_session_<timestamp>.jsonl` y el formato es **JSON Lines
+(.jsonl)**: una línea JSON por evento, sin corchetes de array ni comas entre
+líneas. Las líneas pueden mezclar los tres tipos de evento (`interaction`,
+`position` y `dwell`):
 
-```json
-[
-  {"track_id": 1, "zone_id": "shelf_A1", "action": "taken", "timestamp": 12.5, "event_id": "..."},
-  {"track_id": 2, "zone_id": "shelf_A1", "action": "taken", "timestamp": 15.3, "event_id": "..."},
-  {"track_id": 3, "zone_id": "shelf_B2", "action": "taken", "timestamp": 18.7, "event_id": "..."}
-]
+```jsonl
+{"event_type": "interaction", "track_id": 1, "zone_id": "shelf_A1", "action": "taken", "timestamp": 12.5, "event_id": "...", "is_employee": false}
+{"event_type": "position", "track_id": 1, "frame_index": 312, "timestamp": 12.6, "x": 520.0, "y": 340.0, "source": "ankle_keypoint", "is_employee": false, "event_id": "..."}
+{"event_type": "interaction", "track_id": 2, "zone_id": "shelf_A1", "action": "taken", "timestamp": 15.3, "event_id": "...", "is_employee": false}
+{"event_type": "interaction", "track_id": 3, "zone_id": "shelf_B2", "action": "taken", "timestamp": 18.7, "event_id": "...", "is_employee": false}
+{"event_type": "dwell", "track_id": 3, "zone_id": "shelf_B2", "entry_timestamp": 17.9, "exit_timestamp": 21.2, "duration_sec": 3.3, "is_employee": false, "event_id": "..."}
 ```
 
 ---
@@ -465,12 +523,16 @@ Ejemplo de un archivo de log generado en `data/events/`:
   `config.py`. El contrato de datos (`InteractionEvent`) ya es agnóstico del
   medio de transporte.
 
-- **"ROI Auto-Suggest" automático quedó fuera de alcance de esta iteración**: En
-  lugar de que el usuario dibuje manualmente cada zona, se podría entrenar un
-  modelo ligero para detectar estantes automáticamente en un frame de referencia
-  y sugerir los polígonos de zona. Por ahora, la única forma de definir zonas es
-  con la herramienta manual `ZoneManager` (editor gráfico en la UI del Módulo 1
-  — pendiente de implementar, pero el esquema de datos ya está listo).
+- **"ROI Auto-Suggest" automático ya está implementado**: el auto-suggest está
+  construido en `app/core/roi_suggest.py`, usando **visión clásica** (detección
+  de bordes con `cv2.Canny` + análisis de contornos), NO un modelo entrenado. Se
+  activa opcionalmente con el flag `--auto-suggest` en `scripts/draw_zone_helper.py`,
+  y sugiere hasta 3 candidatos rectangulares que el usuario puede aceptar (teclas
+  `1`/`2`/`3`) y seguir ajustando, o ignorar y dibujar manualmente. La evaluación
+  con datos reales mostró **utilidad mixta** (buen punto de partida, no siempre
+  preciso), por eso queda como opcional, no como comportamiento por defecto. La
+  definición manual de zonas mediante `ZoneManager` sigue siendo el camino
+  principal.
 
 ### Mediano plazo
 
@@ -486,10 +548,11 @@ Ejemplo de un archivo de log generado en `data/events/`:
   - Usar modelos de pose más robustos (YOLOv11-pose-large, MediaPipe).
   - Implementar predicción de keypoints ocultos usando interpolación temporal.
 
-- **Multizona simultánea**: hoy cada persona puede interactuar con una zona a la
-  vez (por diseño del `state_machine`). Para permitir que una persona tenga
-  eventos simultáneos en dos estantes (ej: comparar precios), se necesaría
-  revisar la lógica de estado.
+- **Multizona simultánea**: ya está soportado. El `state_machine` indexa su
+  diccionario de estados por `(track_id, zone_id)`, de modo que cada combinación
+  persona-zona tiene su propio estado independiente, sin ninguna restricción a
+  una sola zona por persona. Una persona puede interactuar con múltiples zonas a
+  la vez (ej: comparar precios en dos estantes) sin requerir cambios de lógica.
 
 ### Largo plazo
 
@@ -539,6 +602,22 @@ de dibujar zonas para poder probar el Módulo 2 mientras tanto.
 uv run python -m scripts.draw_zone_helper --video "data/processed/<archivo>.mp4" --zone-id zone_1 --name "Estanteria Principal" --zone-type product
 ```
 
+### Flag opcional `--auto-suggest`
+
+Agregando `--auto-suggest` al comando anterior, la herramienta dibuja hasta **3
+candidatos rectangulares en naranja** sobre el frame (antes de que empieces a
+hacer click), generados con visión clásica (`cv2.Canny` + análisis de contornos)
+en `app/core/roi_suggest.py`.
+
+- **Cómo usarlo**: basta con añadir `--auto-suggest` al comando ya documentado.
+- **Cómo aceptar una sugerencia**: pulsa las teclas `1`/`2`/`3` para cargar los
+  puntos del candidato correspondiente. Después puedes seguir ajustándolo con
+  clicks normales, o guardarlo directamente con `'s'`. Si prefieres no usar las
+  sugerencias, ignóralas y dibuja manualmente como siempre (las teclas `1`/`2`/`3`
+  solo actúan sobre los candidatos naranjas).
+- **Sin el flag**, el comportamiento es exactamente el mismo de siempre: no se
+  dibujan candidatos y todo funciona como hasta ahora, sin cambios.
+
 ### Comando para visualizar la zona dibujada
 
 Una vez guardada la zona, corre el pipeline de debug sobre el mismo video para confirmar visualmente que quedó bien ajustada al estante:
@@ -573,3 +652,89 @@ Cada zona se guarda como `data/zones/<video_id>/<zone_id>.json`, donde
 `<video_id>` es el nombre del archivo de video sin extensión. Así las zonas
 quedan independientes por video y no se mezclan entre distintas
 grabaciones/tiendas.
+
+---
+
+## 14. Limitaciones conocidas
+
+- **Intercambios de track_id (ID switches)**: cuando dos personas se ocluyen
+  mutuamente desde el ángulo de la cámara, ByteTrack puede intercambiar sus
+  identificadores. No se resuelve con re-identificación porque eso requeriría
+  análisis biométrico, fuera de alcance del proyecto por diseño.
+
+- **Validación por revisión manual**: la validación de precisión/recall del sistema
+  se hace por ahora mediante revisión manual del video comparado contra los eventos
+  generados, no con una métrica automatizada — pendiente para una iteración futura
+  si el tiempo lo permite.
+
+- **Dwell records colgados**: si un `track_id` desaparece del video (se pierde el
+  tracking) mientras una persona estaba dentro de una zona, su entrada queda "colgada"
+  en el `DwellTracker` y nunca se cierra el registro. No hay lógica de expiración por
+  ahora — no es crítico para la demo.
+
+- **Posición de pies en píxeles**: las coordenadas de `PositionSample` son en píxeles
+  del frame de cámara, no en metros reales del piso de la tienda. Convertir a
+  coordenadas reales requeriría calibración de cámara por instalación, fuera de
+  alcance de este MVP.
+
+---
+
+## 15. Flujo de trabajo completo — de cero a evaluación (Módulo 2)
+
+Este flujo consolida en un solo lugar, en orden, todos los pasos necesarios para ir
+de un video nuevo hasta la evaluación de precisión/recall. Es la secuencia que se
+debe correr **por cada video nuevo que se quiera validar**: los pasos 2 y 5 son
+específicos de cada video/zona, mientras que los pasos 1, 3, 4 y 6 se repiten igual
+para cualquier video. No re-explica en detalle qué hace cada script (eso ya está en
+las secciones 9, 10 y 13); es solo la "receta" rápida de referencia.
+
+1. **Correr los tests** (siempre primero, para confirmar que el entorno está sano):
+
+   ```bash
+   uv run pytest tests/ -v
+   ```
+
+2. **Dibujar al menos una zona** sobre el video que se va a usar (repetir una vez por
+   cada estante físico distinto, con `--zone-id` único cada vez; agregar
+   `--auto-suggest` si se quiere partir de una sugerencia automática en vez de dibujar
+   desde cero):
+
+   ```bash
+   uv run python -m scripts.draw_zone_helper --video "data/processed/<archivo>.mp4" --zone-id zone_1 --name "Estanteria Principal" --zone-type product
+   ```
+
+   Si se quiere marcar una zona de staff para la detección heurística de empleados:
+
+   ```bash
+   uv run python -m scripts.draw_zone_helper --video "data/processed/<archivo>.mp4" --zone-id staff_1 --name "Detras del mostrador" --zone-type staff
+   ```
+
+3. **Correr el pipeline visual de debug** sobre el mismo video (genera los eventos que
+   se van a evaluar en el paso 5, y permite validar visualmente tracking, pose, zonas y
+   estados):
+
+   ```bash
+   uv run python -m scripts.run_pipeline_debug --video "data/processed/<archivo>.mp4"
+   ```
+
+4. **Ubicar el archivo de eventos generado** (el nombre incluye un timestamp de sesión,
+   no es fijo):
+
+   ```bash
+   dir data\events        
+   ```
+
+5. **Preparar un ground truth anotado a mano** viendo el mismo video (copiar el template
+   y completar `timestamp,zone_id,track_id,action` por cada interacción real observada;
+   `track_id` puede dejarse vacío, `action` puede dejarse vacío y cae a `"taken"` por
+   defecto):
+
+   ```bash
+   copy data\eval\ground_truth_template.csv data\eval\mi_video_ground_truth.csv
+   ```
+
+6. **Evaluar precision/recall/F1** del sistema contra ese ground truth:
+
+   ```bash
+   uv run python -m scripts.evaluate_events --ground-truth data/eval/mi_video_ground_truth.csv --events "data/events/<archivo_generado_en_paso_4>.jsonl" --output-csv data/eval/reporte_auditoria.csv
+   ```

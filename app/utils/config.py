@@ -75,3 +75,11 @@ EVENTS_LOCAL_LOG_PATH = str(DATA_DIR / "events") # Carpeta de respaldo local mie
 Path(ZONES_STORAGE_PATH).mkdir(parents=True, exist_ok=True)
 Path(EVENTS_LOCAL_LOG_PATH).mkdir(parents=True, exist_ok=True)
 
+# --- Módulo 3: ROI Auto-Suggest (heurística de visión clásica) ---
+ROI_SUGGEST_CANNY_THRESHOLD_1 = 50       # Umbral bajo para Canny edge detection
+ROI_SUGGEST_CANNY_THRESHOLD_2 = 150      # Umbral alto para Canny edge detection
+ROI_SUGGEST_MIN_AREA_RATIO = 0.02        # Proporción mínima del área del frame para aceptar un candidato
+ROI_SUGGEST_MIN_ASPECT_RATIO = 0.2       # Relación de aspecto mínima (ancho/alto)
+ROI_SUGGEST_MAX_ASPECT_RATIO = 5.0       # Relación de aspecto máxima (ancho/alto)
+ROI_SUGGEST_MAX_CANDIDATES = 3           # Máximo número de candidatos devueltos
+

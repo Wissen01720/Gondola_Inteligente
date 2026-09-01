@@ -1,0 +1,27 @@
+# Plantilla de ground truth para evaluar precision/recall de events (Fase 5).
+#
+# Como llenarlo a mano:
+#  - Reproduce el video ORIGINAL y, cada vez que veas a alguien tomar (o devolver)
+#    un producto de un estante, anota UNA fila con los segundos exactos del video
+#    original, el zone_id de ese estante, el track_id (opcional, informativo) y la action.
+#  - timestamp : float, segundos desde el inicio del video original (usa el mismo
+#    timeline que los timestamps de los eventos, ya que ambos pasan por frame_mapping).
+#  - zone_id   : string, debe coincidir EXACTAMENTE con el zone_id definido en
+#    data/zones/<video_id>/ (ej: "zone_1", "zone_2").
+#  - track_id  : opcional. Puede dejarse vacio. NO intentes adivinar el track_id
+#    interno del tracker: solo es informativo y el script NO exige que coincida.
+#  - action    : opcional. Si se deja vacio, se asume "taken".
+#
+# IMPORTANTE: las filas que comienzan con '#' son comentarios y se ignoran.
+# La primera fila NO comentada debe ser la cabecera: timestamp,zone_id,track_id,action
+#
+# Ejemplo de filas (con datos ficticios coherentes, si el video es corto ajusta los segundos):
+# 3.5,zone_1,1,taken
+# 8.0,zone_1,,    <- track_id vacio es valido (se asume taken si action vacia)
+# 12.2,zone_2,2,taken
+
+timestamp,zone_id,track_id,action
+5.0,zone_1,1,taken
+11.5,zone_1,,taken
+18.0,zone_2,2,taken
+24.3,zone_2,3,returned
