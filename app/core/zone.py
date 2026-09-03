@@ -4,18 +4,36 @@ Gestión de zonas de góndola y operaciones geométricas.
 import json
 import math
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 from shapely.geometry import Point, Polygon
 
 from app.core.schemas import Zone, ZoneSignal, PoseResult, Keypoint
 from app.utils.config import ZONES_STORAGE_PATH, ARM_EXTENSION_MIN_RATIO, MIN_KEYPOINT_CONFIDENCE
+
+# Cache de objetos Polygon de Shapely, para no reconstruirlos en cada llamada:
+# is_point_in_polygon() se invoca por cada persona, por cada zona, en cada
+# frame del video, y Polygon(zone.polygon) tiene un costo de construcción
+# no trivial (validación de geometría) que no vale la pena repetir si el
+# polígono de la zona no cambió.
+_polygon_cache: Dict[str, Polygon] = {}
+
+
+def _get_cached_polygon(zone: Zone) -> Polygon:
+    # Se cachea por (zone_id, tupla de puntos) para invalidar automáticamente
+    # si el polígono de la zona se edita y se vuelve a cargar con el mismo id.
+    cache_key = f"{zone.zone_id}:{tuple(zone.polygon)}"
+    poly = _polygon_cache.get(cache_key)
+    if poly is None:
+        poly = Polygon(zone.polygon)
+        _polygon_cache[cache_key] = poly
+    return poly
 
 
 def is_point_in_polygon(x: float, y: float, zone: Zone) -> bool:
     """Verifica si un punto (x, y) está dentro del polígono de una zona."""
     if len(zone.polygon) < 3:
         return False
-    poly = Polygon(zone.polygon)
+    poly = _get_cached_polygon(zone)
     return Point(x, y).within(poly)
 
 class ZoneManager:

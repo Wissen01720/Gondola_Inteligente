@@ -208,11 +208,11 @@ reescribir lo ya construido.
 
 ### Corto plazo (siguiente módulo lógico)
 
-- **Detección y tracking de personas** (`app/core/detector.py` +
-  `app/core/tracker.py`): correr YOLOv8/pose sobre los videos de
-  `data/processed/`, asignar un ID efímero por persona con ByteTrack o
-  DeepSORT, y guardar las trayectorias (no los frames con rostro) en un
-  formato ligero (CSV/JSON) para las siguientes etapas.
+- **Detección y tracking de personas** (`app/core/tracker.py`): correr
+  YOLOv8/pose sobre los videos de `data/processed/`, asignar un ID
+  efímero por persona con ByteTrack, y guardar las trayectorias (no
+  los frames con rostro) en un formato ligero (CSV/JSON) para las
+  siguientes etapas.
 - **Zonificación manual**: una pestaña simple donde el usuario dibuje
   polígonos sobre un frame del video (con clicks) para marcar "góndola
   1", "pasillo 2", etc. Esto es indispensable antes de poder calcular
@@ -284,8 +284,7 @@ cada componente tiene una responsabilidad clara:
 
 ```
 app/core/
-├── detector.py          # Detección de personas con YOLOv11 (clase 0 COCO)
-├── tracker.py           # Tracking persistente con ByteTrack integrado
+├── tracker.py           # Detección + tracking persistente con ByteTrack (YOLOv11, clase 0 COCO)
 ├── pose.py              # Estimación de pose corporal (17 keypoints COCO)
 ├── zone.py              # Validación de zonas y cálculo de señales geométricas
 ├── state_machine.py     # Máquina de estados: IDLE → REACHING → HOLDING → EVENTO

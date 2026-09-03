@@ -10,7 +10,8 @@ detección/tracking):
   4. Reencoda a un contenedor/codec consistente.
 
 No hace nada de detección de personas ni tracking: esa es la siguiente
-etapa del pipeline (futuro módulo `app/core/detector.py`).
+etapa del pipeline (`app/core/tracker.py`, que hace detección + tracking
+en un solo paso).
 """
 import json
 from dataclasses import dataclass, asdict, field

@@ -2,10 +2,10 @@
 Tracking de personas utilizando el tracker integrado de Ultralytics (ByteTrack).
 
 Nota de diseño:
-Este módulo utiliza su propia instancia de YOLO con el tracking activado (.track) para
-mantener los track_ids estables a lo largo del video. Se separa de detector.py para
-permitir que detector.py sea un componente de detección pura reusable (sin el overhead
-de mantener estados de tracking) mientras que tracker.py se encarga de la persistencia temporal.
+Este módulo usa su propia instancia de YOLO con el tracking activado (.track)
+y hace detección + tracking en un solo paso (no existe un módulo `detector.py`
+separado: se retiró por ser código muerto, ya que esta clase cubre esa
+responsabilidad por completo).
 """
 from typing import List
 import numpy as np
