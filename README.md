@@ -58,8 +58,7 @@ scapder-vision/
 │   │   │   ├── workers.py         #   QThread para que la UI no se congele (limpieza)
 │   │   │   └── frame_source.py    #   FrameSource: video limpio + mapping / cámara en vivo (stub)
 │   │   ├── detection/             # Team 2 — pipeline de detección
-│   │   │   ├── detector.py        #   Detección YOLOv11 (clase 0 COCO)
-│   │   │   ├── tracker.py         #   Tracking persistente con ByteTrack integrado
+│   │   │   ├── tracker.py         #   Detección + tracking con ByteTrack integrado (YOLOv11, clase 0 COCO)
 │   │   │   ├── pose.py            #   Estimación de pose corporal (17 keypoints)
 │   │   │   ├── zone.py            #   Zonas + señales geométricas (ZoneManager)
 │   │   │   ├── state_machine.py   #   Máquina de estados IDLE→REACHING→HOLDING
@@ -287,8 +286,7 @@ cada componente tiene una responsabilidad clara (todos en
 
 ```
 app/core/detection/
-├── detector.py          # Detección de personas con YOLOv11 (clase 0 COCO)
-├── tracker.py           # Tracking persistente con ByteTrack integrado
+├── tracker.py           # Detección + tracking con ByteTrack integrado (YOLOv11, clase 0 COCO)
 ├── pose.py              # Estimación de pose corporal (17 keypoints COCO)
 ├── zone.py              # Validación de zonas y cálculo de señales geométricas
 ├── state_machine.py     # Máquina de estados: IDLE → REACHING → HOLDING → EVENTO

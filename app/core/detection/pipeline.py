@@ -53,11 +53,11 @@ class DetectionPipeline:
         if isinstance(source, (str, Path)):
             source = VideoFileFrameSource(source)
 
-        zones = self.zone_manager.load_zones()
+        zones = self.zone_manager.load_zones(source.video_id)
         if not zones:
-            print(f"Advertencia: No hay zonas de góndola definidas en {self.zone_manager.storage_path}")
+            print(f"Advertencia: No hay zonas de góndola definidas para '{source.video_id}' en {self.zone_manager.storage_path}")
 
-        frame_index = 0
+        frames_processed = 0
         try:
             while True:
                 sample = source.next_frame()
@@ -92,12 +92,12 @@ class DetectionPipeline:
                 for position_sample in samples:
                     self.event_publisher.publish(position_sample)
 
-                frame_index += 1
+                frames_processed += 1
                 if progress_callback:
-                    progress_callback(frame_index)
+                    progress_callback(frames_processed)
         finally:
             source.close()
-            print(f"Procesamiento completado. Se procesaron {frame_index} frames.")
+            print(f"Procesamiento completado. Se procesaron {frames_processed} frames.")
 
     def run_video(self, video_path: str) -> None:
         """Conveniencia: corre el pipeline sobre una ruta de video limpio."""

@@ -11,22 +11,27 @@ from app.core.detection.schemas import Zone, ZoneSignal, PoseResult, Keypoint
 from app.utils.config import ZONES_STORAGE_PATH, ARM_EXTENSION_MIN_RATIO, MIN_KEYPOINT_CONFIDENCE
 
 class ZoneManager:
-    """Administra la carga y persistencia de las zonas de la góndola."""
+    """Administra la carga y persistencia de las zonas de la góndola, agrupadas por video/cámara."""
 
     def __init__(self, storage_path: str = ZONES_STORAGE_PATH):
         self.storage_path = Path(storage_path)
         self.storage_path.mkdir(parents=True, exist_ok=True)
 
     def save_zone(self, zone: Zone) -> None:
-        """Guarda una zona en un archivo JSON."""
-        file_path = self.storage_path / f"{zone.zone_id}.json"
+        """Guarda una zona en un archivo JSON, dentro de la subcarpeta de su video."""
+        video_dir = self.storage_path / zone.video_id
+        video_dir.mkdir(parents=True, exist_ok=True)
+        file_path = video_dir / f"{zone.zone_id}.json"
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(zone.model_dump(), f, indent=4)
 
-    def load_zones(self) -> List[Zone]:
-        """Carga todas las zonas guardadas en el directorio de almacenamiento."""
+    def load_zones(self, video_id: str) -> List[Zone]:
+        """Carga las zonas guardadas para un video/cámara específico (no mezcla con otros)."""
         zones = []
-        for file_path in self.storage_path.glob("*.json"):
+        video_dir = self.storage_path / video_id
+        if not video_dir.exists():
+            return zones
+        for file_path in video_dir.glob("*.json"):
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)

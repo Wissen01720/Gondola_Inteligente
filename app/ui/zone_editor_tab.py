@@ -138,6 +138,7 @@ class ZoneEditorTab(QWidget):
     def __init__(self):
         super().__init__()
         self.zone_manager = ZoneManager()
+        self._current_video_id: Optional[str] = None
         self._build_ui()
         self._refresh_zone_list()
 
@@ -223,6 +224,8 @@ class ZoneEditorTab(QWidget):
             if image.isNull():
                 raise VideoLoadError(f"No se pudo leer la miniatura: {thumb_path}")
             self.canvas.set_frame(image)
+            self._current_video_id = video_info.path.stem
+            self._refresh_zone_list()
             self._log(f"✅ Frame de referencia cargado: {video_info.filename} "
                       f"({video_info.width}x{video_info.height}) — escala de dibujo lista.")
         except VideoLoadError as exc:
@@ -236,7 +239,7 @@ class ZoneEditorTab(QWidget):
 
     def _on_save(self):
         """Guarda la zona dibujada con el esquema `Zone` vía ZoneManager."""
-        if self.canvas._image is None:
+        if self.canvas._image is None or self._current_video_id is None:
             QMessageBox.warning(self, "Sin frame", "Carga primero un video con el frame de referencia.")
             return
         if len(self.canvas.points) < 3:
@@ -249,19 +252,21 @@ class ZoneEditorTab(QWidget):
 
         zone_id = self._next_zone_id()
         polygon = [(round(x, 2), round(y, 2)) for (x, y) in self.canvas.points]
-        zone = Zone(zone_id=zone_id, name=name, polygon=polygon)
+        zone = Zone(zone_id=zone_id, video_id=self._current_video_id, name=name, polygon=polygon)
         self.zone_manager.save_zone(zone)
-        self._log(f"✅ Zona guardada: {zone_id} — {name} ({len(polygon)} vértices)")
+        self._log(f"✅ Zona guardada: {zone_id} — {name} ({len(polygon)} vértices) [{self._current_video_id}]")
 
         self.name_input.clear()
         self.canvas.clear_points()
         self._refresh_zone_list()
 
     def _next_zone_id(self) -> str:
-        """Genera el siguiente zone_id libre (zone_1, zone_2, ...) sin pisar los existentes."""
+        """Genera el siguiente zone_id libre (zone_1, zone_2, ...) para el video actual, sin pisar los existentes."""
         existing = set()
-        for f in self.zone_manager.storage_path.glob("*.json"):
-            existing.add(f.stem)
+        video_dir = self.zone_manager.storage_path / self._current_video_id
+        if video_dir.exists():
+            for f in video_dir.glob("*.json"):
+                existing.add(f.stem)
         n = 1
         while f"zone_{n}" in existing:
             n += 1
@@ -270,7 +275,10 @@ class ZoneEditorTab(QWidget):
     # ----------------------------------------------------------- helpers --
     def _refresh_zone_list(self):
         self.zone_list.clear()
-        self._zones = {z.zone_id: z for z in self.zone_manager.load_zones()}
+        if self._current_video_id is None:
+            self._zones = {}
+            return
+        self._zones = {z.zone_id: z for z in self.zone_manager.load_zones(self._current_video_id)}
         for zone_id, zone in self._zones.items():
             item = QListWidgetItem(f"{zone_id} — {zone.name} ({len(zone.polygon)} pts)")
             item.setData(Qt.UserRole, zone_id)

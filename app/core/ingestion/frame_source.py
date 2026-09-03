@@ -43,6 +43,13 @@ class FrameSource(ABC):
         """Frames por segundo del stream (usado para la máquina de estados)."""
         pass
 
+    @property
+    @abstractmethod
+    def video_id(self) -> str:
+        """Identificador de esta fuente (nombre de archivo o id de cámara), usado para
+        cargar solo las zonas que le corresponden y no mezclarlas con las de otro video/cámara."""
+        pass
+
     @abstractmethod
     def next_frame(self) -> Optional[FrameSample]:
         """Devuelve el siguiente frame o None cuando el stream se agota."""
@@ -73,6 +80,7 @@ class VideoFileFrameSource(FrameSource):
             raise FileNotFoundError(f"No se encontró el video: {video_path}")
 
         self.video_path = video_path_obj
+        self._video_id = video_path_obj.stem
         self.cap = cv2.VideoCapture(str(video_path_obj))
         if not self.cap.isOpened():
             raise IOError(f"No se pudo abrir el archivo de video: {video_path}")
@@ -105,6 +113,10 @@ class VideoFileFrameSource(FrameSource):
     @property
     def fps(self) -> float:
         return self._fps
+
+    @property
+    def video_id(self) -> str:
+        return self._video_id
 
     def next_frame(self) -> Optional[FrameSample]:
         ret, frame = self.cap.read()
@@ -141,6 +153,10 @@ class LiveFrameSource(FrameSource):
     @property
     def fps(self) -> float:
         return self._fps
+
+    @property
+    def video_id(self) -> str:
+        return self.source_id
 
     def next_frame(self) -> Optional[FrameSample]:
         # TODO(Team 1): abrir webcam/RTSP (cv2.VideoCapture) y devolver el

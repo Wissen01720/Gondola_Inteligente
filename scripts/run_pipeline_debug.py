@@ -38,8 +38,8 @@ def main():
     zone_manager = ZoneManager()
     event_publisher = LocalEventPublisher(mode="stdout")
 
-    zones = zone_manager.load_zones()
-    print(f"Zonas cargadas: {[z.name for z in zones]}")
+    zones = zone_manager.load_zones(source.video_id)
+    print(f"Zonas cargadas para '{source.video_id}': {[z.name for z in zones]}")
 
     fps = source.fps
     # Instanciar state_machine con fps real del video

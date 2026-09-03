@@ -34,7 +34,8 @@ class PoseResult(BaseModel):
 
 class Zone(BaseModel):
     """Geometría de una zona de la góndola."""
-    zone_id: str = Field(description="Identificador único (nombre de archivo en data/zones)")
+    zone_id: str = Field(description="Identificador único (nombre de archivo en data/zones/<video_id>/)")
+    video_id: str = Field(description="Video/cámara al que pertenece esta zona (evita mezclar zonas entre videos distintos)")
     name: str = Field(description="Nombre legible de la zona (ej: Góndola A1)")
     polygon: List[Tuple[float, float]] = Field(description="Puntos (x, y) que cierran la zona")
 

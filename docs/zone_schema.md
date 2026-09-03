@@ -19,16 +19,7 @@ exactamente `Zone.model_dump()` — no hay un formato de datos aparte.
 Ejemplo de un archivo real en este repositorio (`data/zones/`):
 
 ```json
-{
-    "zone_id": "zone_1",
-    "name": "Estanteria Principal",
-    "polygon": [
-        [100.0, 100.0],
-        [800.0, 100.0],
-        [800.0, 700.0],
-        [100.0, 700.0]
-    ]
-}
+
 ```
 
 ## Modelos del contrato
@@ -39,7 +30,8 @@ Geometría de una zona de la góndola.
 
 | Campo | Tipo | Default | Descripción |
 |-------|------|---------|-------------|
-| `zone_id` | `str` | requerido | Identificador único (nombre de archivo en data/zones) |
+| `zone_id` | `str` | requerido | Identificador único (nombre de archivo en data/zones/<video_id>/) |
+| `video_id` | `str` | requerido | Video/cámara al que pertenece esta zona (evita mezclar zonas entre videos distintos) |
 | `name` | `str` | requerido | Nombre legible de la zona (ej: Góndola A1) |
 | `polygon` | `List[Tuple[float, float]]` | requerido | Puntos (x, y) que cierran la zona |
 
