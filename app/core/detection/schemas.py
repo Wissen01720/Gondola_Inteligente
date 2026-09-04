@@ -62,7 +62,13 @@ class InteractionEvent(BaseModel):
     track_id: int = Field(description="Identificador efímero de la persona en esta sesión de video")
     zone_id: str = Field(description="Zona de góndola donde ocurrió la interacción")
     action: Literal["reaching", "holding", "taken", "returned"] = Field(
-        description="Tipo de interacción detectada (por ahora solo 'taken' como placeholder)"
+        description=(
+            "Tipo de interacción detectada. La máquina de estados solo distingue "
+            "'taken'/'returned' (no hay detección de producto): la primera interacción "
+            "de una persona con una zona en la sesión es 'taken', las siguientes "
+            "alternan a 'returned'/'taken' (heurístico, ver state_machine.py). "
+            "'reaching'/'holding' quedan reservados para una futura granularidad."
+        )
     )
     timestamp: float = Field(description="Segundos traducidos al video original (o wall-clock en vivo)")
     event_id: str = Field(default_factory=_new_event_id, description="UUID para auditoría y deduplicación")

@@ -54,7 +54,7 @@ Evento final de interacción enviado al bus de eventos y guardado localmente.
 |-------|------|---------|-------------|
 | `track_id` | `int` | requerido | Identificador efímero de la persona en esta sesión de video |
 | `zone_id` | `str` | requerido | Zona de góndola donde ocurrió la interacción |
-| `action` | `Literal['reaching', 'holding', 'taken', 'returned']` | requerido | Tipo de interacción detectada (por ahora solo 'taken' como placeholder) |
+| `action` | `Literal['reaching', 'holding', 'taken', 'returned']` | requerido | Tipo de interacción detectada. La máquina de estados solo distingue 'taken'/'returned' (no hay detección de producto): la primera interacción de una persona con una zona en la sesión es 'taken', las siguientes alternan a 'returned'/'taken' (heurístico, ver state_machine.py). 'reaching'/'holding' quedan reservados para una futura granularidad. |
 | `timestamp` | `float` | requerido | Segundos traducidos al video original (o wall-clock en vivo) |
 | `event_id` | `str` | auto: _new_event_id() | UUID para auditoría y deduplicación |
 | `is_employee` | `bool` | `False` | True si el track fue marcado como empleado (StaffZoneTracker) antes o durante este evento |

@@ -27,6 +27,14 @@ class InteractionStateMachine:
         self.missing_counters: Dict[int, int] = {}
         # Key: (track_id, zone_id) -> Value: frames consecutivos atascado en REACHING
         self.stuck_counters: Dict[Tuple[int, str], int] = {}
+        # Key: (track_id, zone_id) -> Value: cuántas interacciones completas (taken/returned)
+        # ya se emitieron para esta pareja persona+zona en esta sesión de video.
+        # Heurístico de negocio (sin detección de producto no se puede saber con certeza
+        # si la mano sale con o sin el producto): la primera interacción se cuenta como
+        # "taken"; toda repetición sobre la MISMA zona se cuenta como "returned",
+        # alternando. Aproximado, pero es lo que Joshua (Scapder) confirmó que basta
+        # para el alcance del reto (ver docs/event_schema.md).
+        self.interaction_counts: Dict[Tuple[int, str], int] = {}
         # Calcular el máximo de frames permitidos en estado REACHING con brazo no extendido
         self.max_frames_stuck_reaching = round(fps * MAX_SECONDS_STUCK_REACHING)
 
@@ -104,14 +112,18 @@ class InteractionStateMachine:
                     # Transición a IDLE: resetear contador de atasco
                     self.stuck_counters.pop((tid, zid), None)
                     if count >= MIN_FRAMES_HOLDING:
-                        # Emite InteractionEvent con action="taken" por defecto
-                        # Nota de diseño/negocio: La distinción taken/returned no es determinable
-                        # solo con pose ya que no hay detección de producto. Se asume "taken" por simplificación.
+                        # Heurístico taken/returned (ver nota en __init__): la primera
+                        # interacción completa persona+zona en la sesión es "taken",
+                        # las siguientes alternan a "returned"/"taken".
+                        n = self.interaction_counts.get((tid, zid), 0)
+                        action = "taken" if n % 2 == 0 else "returned"
+                        self.interaction_counts[(tid, zid)] = n + 1
+
                         events.append(
                             InteractionEvent(
                                 track_id=tid,
                                 zone_id=zid,
-                                action="taken",
+                                action=action,
                                 timestamp=0.0,  # Se traduce luego en el pipeline
                             )
                         )

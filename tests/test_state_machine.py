@@ -99,7 +99,50 @@ def test_independent_multiple_tracks():
     assert sm.states[(t1, zone)][0] == InteractionState.REACHING
     assert sm.states.get((t2, zone), (InteractionState.IDLE, 0))[0] == InteractionState.IDLE
 
-def test_stuck_reaching_resets_to_idle():
+def _drive_full_interaction(sm, track_id, zone_id, start_frame):
+    """Helper: corre un ciclo completo REACHING -> HOLDING -> salida y devuelve los eventos de la salida."""
+    frame = start_frame
+    sm.process([ZoneSignal(track_id=track_id, zone_id=zone_id, frame_index=frame, wrist_inside=True, arm_extended=True)])
+    for _ in range(MIN_FRAMES_REACHING_TO_HOLDING - 1):
+        frame += 1
+        sm.process([ZoneSignal(track_id=track_id, zone_id=zone_id, frame_index=frame, wrist_inside=True, arm_extended=True)])
+    for _ in range(MIN_FRAMES_HOLDING):
+        frame += 1
+        sm.process([ZoneSignal(track_id=track_id, zone_id=zone_id, frame_index=frame, wrist_inside=True, arm_extended=False)])
+    frame += 1
+    events = sm.process([ZoneSignal(track_id=track_id, zone_id=zone_id, frame_index=frame, wrist_inside=False, arm_extended=False)])
+    return events, frame
+
+
+def test_second_interaction_same_zone_is_returned():
+    """La primera interacción completa con una zona es 'taken'; la segunda, 'returned' (heurístico)."""
+    sm = InteractionStateMachine()
+    track_id, zone_id = 1, "shelf_1"
+
+    events1, next_frame = _drive_full_interaction(sm, track_id, zone_id, start_frame=0)
+    assert len(events1) == 1
+    assert events1[0].action == "taken"
+
+    events2, next_frame = _drive_full_interaction(sm, track_id, zone_id, start_frame=next_frame + 1)
+    assert len(events2) == 1
+    assert events2[0].action == "returned"
+
+    events3, _ = _drive_full_interaction(sm, track_id, zone_id, start_frame=next_frame + 1)
+    assert len(events3) == 1
+    assert events3[0].action == "taken"
+
+
+def test_interactions_independent_per_zone():
+    """El conteo taken/returned es independiente por (track_id, zone_id): otra zona empieza en 'taken'."""
+    sm = InteractionStateMachine()
+    track_id = 1
+
+    events_a, next_frame = _drive_full_interaction(sm, track_id, "shelf_A", start_frame=0)
+    assert events_a[0].action == "taken"
+
+    # Primera interacción en una zona DISTINTA: también debe ser "taken", no "returned"
+    events_b, _ = _drive_full_interaction(sm, track_id, "shelf_B", start_frame=next_frame + 1)
+    assert events_b[0].action == "taken"
     """Prueba que si una interacción se atasca en REACHING (brazo no extendido pero muñeca dentro)
     durante más de MAX_SECONDS_STUCK_REACHING, se resetea a IDLE sin emitir evento."""
     fps = 30.0
