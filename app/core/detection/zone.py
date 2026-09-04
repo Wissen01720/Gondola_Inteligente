@@ -4,11 +4,33 @@ Gestión de zonas de góndola y operaciones geométricas.
 import json
 import math
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 from shapely.geometry import Point, Polygon
 
 from app.core.detection.schemas import Zone, ZoneSignal, PoseResult, Keypoint
 from app.utils.config import ZONES_STORAGE_PATH, ARM_EXTENSION_MIN_RATIO, MIN_KEYPOINT_CONFIDENCE
+
+# Cache de objetos Polygon de Shapely, para no reconstruirlos en cada llamada:
+# se invoca por cada persona, por cada zona, en cada frame del video, y
+# Polygon(zone.polygon) tiene un costo de construcción no trivial que no
+# vale la pena repetir si el polígono de la zona no cambió.
+_polygon_cache: Dict[str, Polygon] = {}
+
+
+def _get_cached_polygon(zone: Zone) -> Polygon:
+    cache_key = f"{zone.zone_id}:{zone.video_id}:{tuple(zone.polygon)}"
+    poly = _polygon_cache.get(cache_key)
+    if poly is None:
+        poly = Polygon(zone.polygon)
+        _polygon_cache[cache_key] = poly
+    return poly
+
+
+def is_point_in_polygon(x: float, y: float, zone: Zone) -> bool:
+    """Verifica si un punto (x, y) está dentro del polígono de una zona."""
+    if len(zone.polygon) < 3:
+        return False
+    return Point(x, y).within(_get_cached_polygon(zone))
 
 class ZoneManager:
     """Administra la carga y persistencia de las zonas de la góndola, agrupadas por video/cámara."""
@@ -86,18 +108,16 @@ def check_zone_signal(pose: PoseResult, zones: List[Zone]) -> List[ZoneSignal]:
     for zone in zones:
         if len(zone.polygon) < 3:
             continue
-        
-        poly = Polygon(zone.polygon)
-        
+
         # Evaluar si la muñeca izquierda está adentro (solo si es válida)
         left_inside = False
         if left_valid:
-            left_inside = Point(pose.left_wrist.x, pose.left_wrist.y).within(poly)
+            left_inside = is_point_in_polygon(pose.left_wrist.x, pose.left_wrist.y, zone)
         
         # Evaluar si la muñeca derecha está adentro (solo si es válida)
         right_inside = False
         if right_valid:
-            right_inside = Point(pose.right_wrist.x, pose.right_wrist.y).within(poly)
+            right_inside = is_point_in_polygon(pose.right_wrist.x, pose.right_wrist.y, zone)
         
         wrist_inside = left_inside or right_inside
         

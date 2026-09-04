@@ -6,8 +6,16 @@ Nota de diseño: el timestamp original (traducido vía `frame_mapping`
 cuando aplica) lo provee la `FrameSource`; este módulo NO duplica esa
 lógica — solo anota posición + tiempo por frame y track activo.
 """
+from typing import Tuple
+
 from app.core.detection.schemas import PositionSample, TrackedPerson
 from app.utils.config import TRAJECTORY_SAMPLE_EVERY_N_FRAMES
+
+
+def compute_foot_position(person: TrackedPerson) -> Tuple[float, float]:
+    """Bottom-center del bbox como proxy de la posición del pie de una persona."""
+    x1, y1, x2, y2 = person.bbox
+    return (x1 + x2) / 2.0, float(y2)
 
 
 class TrajectoryCapture:
@@ -47,10 +55,7 @@ class TrajectoryCapture:
 
         samples: list[PositionSample] = []
         for person in tracked_people:
-            x1, y1, x2, y2 = person.bbox
-            # Bottom-center del bbox como proxy del pie
-            foot_x = (x1 + x2) / 2.0
-            foot_y = float(y2)
+            foot_x, foot_y = compute_foot_position(person)
 
             samples.append(
                 PositionSample(

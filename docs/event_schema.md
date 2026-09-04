@@ -42,7 +42,7 @@ DetectionPipeline ──publish(BaseModel)──► EventPublisher
 
 El despacho por tipo en el receptor (p.ej. `EventStore.on_bus_message`) se
 hace por campos distintivos del payload: `foot_position` => `PositionSample`,
-`event_id` + `action` => `InteractionEvent`.
+`duration_sec` => `DwellRecord`, `event_id` + `action` => `InteractionEvent`.
 
 ## Modelos del bus
 
@@ -57,6 +57,7 @@ Evento final de interacción enviado al bus de eventos y guardado localmente.
 | `action` | `Literal['reaching', 'holding', 'taken', 'returned']` | requerido | Tipo de interacción detectada (por ahora solo 'taken' como placeholder) |
 | `timestamp` | `float` | requerido | Segundos traducidos al video original (o wall-clock en vivo) |
 | `event_id` | `str` | auto: _new_event_id() | UUID para auditoría y deduplicación |
+| `is_employee` | `bool` | `False` | True si el track fue marcado como empleado (StaffZoneTracker) antes o durante este evento |
 
 ### `PositionSample`
 
@@ -69,6 +70,22 @@ Muestra de posición continua de una persona en un frame.
 | `original_timestamp_sec` | `float` | requerido | Segundos traducidos al video original (o wall-clock en vivo) |
 | `foot_position` | `Tuple[float, float]` | requerido | Bottom-center del bbox como proxy del pie (x, y) |
 | `camera_id` | `str` | `'cam_1'` | Escalable a multi-cámara en el futuro |
+| `is_employee` | `bool` | `False` | True si el track fue marcado como empleado (StaffZoneTracker) al momento de esta muestra |
+
+### `DwellRecord`
+
+Registro de tiempo de permanencia de una persona dentro de una zona de producto.
+
+| Campo | Tipo | Default | Descripción |
+|-------|------|---------|-------------|
+| `event_type` | `Literal['dwell']` | `'dwell'` | — |
+| `track_id` | `int` | requerido | Identificador efímero de la persona en esta sesión |
+| `zone_id` | `str` | requerido | Zona de producto donde se registró la permanencia |
+| `entry_timestamp` | `float` | requerido | Segundos (video original) en que la persona entró a la zona |
+| `exit_timestamp` | `float` | requerido | Segundos (video original) en que la persona salió de la zona |
+| `duration_sec` | `float` | requerido | Duración de la permanencia, en segundos |
+| `is_employee` | `bool` | `False` | True si el track estaba marcado como empleado al salir de la zona |
+| `event_id` | `str` | auto: _new_event_id() | UUID para auditoría y deduplicación |
 
 
 

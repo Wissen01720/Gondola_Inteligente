@@ -13,13 +13,37 @@ en el futuro, los cálculos de dwell time del dashboard.
 ## Persistencia
 
 `ZoneManager` (`app/core/detection/zone.py`) guarda **un archivo JSON por
-zona** en `data/zones/<zone_id>.json`. El formato del archivo es
-exactamente `Zone.model_dump()` — no hay un formato de datos aparte.
+zona**, agrupados en una subcarpeta por video/cámara:
+`data/zones/<video_id>/<zone_id>.json`. Esto evita que las zonas de un video
+se mezclen con las de otro al cargar. El formato del archivo es exactamente
+`Zone.model_dump()` — no hay un formato de datos aparte.
 
 Ejemplo de un archivo real en este repositorio (`data/zones/`):
 
 ```json
-
+{
+    "zone_id": "zone_1",
+    "name": "Estanteria Principal",
+    "polygon": [
+        [
+            100.0,
+            100.0
+        ],
+        [
+            800.0,
+            100.0
+        ],
+        [
+            800.0,
+            700.0
+        ],
+        [
+            100.0,
+            700.0
+        ]
+    ],
+    "video_id": "USA CCTV Market Camera_clean"
+}
 ```
 
 ## Modelos del contrato
@@ -34,6 +58,7 @@ Geometría de una zona de la góndola.
 | `video_id` | `str` | requerido | Video/cámara al que pertenece esta zona (evita mezclar zonas entre videos distintos) |
 | `name` | `str` | requerido | Nombre legible de la zona (ej: Góndola A1) |
 | `polygon` | `List[Tuple[float, float]]` | requerido | Puntos (x, y) que cierran la zona |
+| `zone_type` | `Literal['product', 'staff']` | `'product'` | 'product' = zona de góndola (dwell time); 'staff' = zona de personal (excluye de métricas de cliente) |
 
 ### `ZoneSignal`
 

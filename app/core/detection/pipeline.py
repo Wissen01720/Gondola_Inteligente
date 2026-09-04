@@ -14,7 +14,10 @@ from app.core.detection.pose import PoseEstimator
 from app.core.detection.zone import ZoneManager, check_zone_signal
 from app.core.detection.state_machine import InteractionStateMachine
 from app.core.detection.event_publisher import EventPublisher
-from app.core.detection.trajectory import TrajectoryCapture
+from app.core.detection.trajectory import TrajectoryCapture, compute_foot_position
+from app.core.detection.presence import DwellTracker
+from app.core.detection.staff import StaffZoneTracker
+from app.core.detection.schemas import PositionSample
 
 
 class DetectionPipeline:
@@ -28,6 +31,8 @@ class DetectionPipeline:
         state_machine: InteractionStateMachine,
         event_publisher: EventPublisher,
         trajectory: Optional[TrajectoryCapture] = None,
+        dwell_tracker: Optional[DwellTracker] = None,
+        staff_tracker: Optional[StaffZoneTracker] = None,
     ):
         self.tracker = tracker
         self.pose_estimator = pose_estimator
@@ -35,6 +40,8 @@ class DetectionPipeline:
         self.state_machine = state_machine
         self.event_publisher = event_publisher
         self.trajectory = trajectory or TrajectoryCapture()
+        self.dwell_tracker = dwell_tracker or DwellTracker()
+        self.staff_tracker = staff_tracker or StaffZoneTracker()
 
     def run(
         self,
@@ -72,6 +79,30 @@ class DetectionPipeline:
                 # 2. Estimar pose
                 pose_results = self.pose_estimator.estimate(sample.frame, frame_index, tracked_people)
 
+                # 2.5 Estimar posición de pies, detectar staff y medir dwell time.
+                # Se hace cada frame (no cada N frames como TrajectoryCapture)
+                # porque tanto la detección de staff como el dwell time
+                # necesitan precisión temporal fina para no perder entradas/
+                # salidas cortas de una zona.
+                for person in tracked_people:
+                    foot_x, foot_y = compute_foot_position(person)
+                    position_sample = PositionSample(
+                        track_id=person.track_id,
+                        frame_index=frame_index,
+                        original_timestamp_sec=sample.timestamp_sec,
+                        foot_position=(foot_x, foot_y),
+                        camera_id=self.trajectory.camera_id,
+                    )
+                    is_emp = self.staff_tracker.update(position_sample, zones)
+                    position_sample.is_employee = is_emp
+
+                    dwell_records = self.dwell_tracker.update(
+                        position_sample, zones, sample.timestamp_sec,
+                    )
+                    for dwell_record in dwell_records:
+                        dwell_record.is_employee = self.staff_tracker.is_employee(dwell_record.track_id)
+                        self.event_publisher.publish(dwell_record)
+
                 # 3. Calcular señales de zona
                 all_signals = []
                 for pose in pose_results:
@@ -85,11 +116,13 @@ class DetectionPipeline:
                     # El timestamp ya viene traducido por la FrameSource
                     # (video original vía frame_mapping, o wall-clock en vivo)
                     event.timestamp = sample.timestamp_sec
+                    event.is_employee = self.staff_tracker.is_employee(event.track_id)
                     self.event_publisher.publish(event)
 
                 # 6. Publicar muestras de posición continua (heatmaps de circulación)
-                samples = self.trajectory.process(frame_index, tracked_people, sample.timestamp_sec)
-                for position_sample in samples:
+                trajectory_samples = self.trajectory.process(frame_index, tracked_people, sample.timestamp_sec)
+                for position_sample in trajectory_samples:
+                    position_sample.is_employee = self.staff_tracker.is_employee(position_sample.track_id)
                     self.event_publisher.publish(position_sample)
 
                 frames_processed += 1

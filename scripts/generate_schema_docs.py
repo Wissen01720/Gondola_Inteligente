@@ -73,9 +73,9 @@ def _model_doc(model) -> str:
 
 
 def _load_zone_example() -> str:
-    """Lee un archivo real de data/zones/ para usarlo como ejemplo (sin drift)."""
+    """Lee un archivo real de data/zones/<video_id>/ para usarlo como ejemplo (sin drift)."""
     zones_dir = Path(__file__).resolve().parent.parent / "data" / "zones"
-    for f in sorted(zones_dir.glob("*.json")):
+    for f in sorted(zones_dir.glob("**/*.json")):
         return f.read_text(encoding="utf-8").strip()
     return ""
 
@@ -121,7 +121,7 @@ DetectionPipeline ──publish(BaseModel)──► EventPublisher
 
 El despacho por tipo en el receptor (p.ej. `EventStore.on_bus_message`) se
 hace por campos distintivos del payload: `foot_position` => `PositionSample`,
-`event_id` + `action` => `InteractionEvent`.
+`duration_sec` => `DwellRecord`, `event_id` + `action` => `InteractionEvent`.
 
 ## Modelos del bus
 """
@@ -139,8 +139,10 @@ en el futuro, los cálculos de dwell time del dashboard.
 ## Persistencia
 
 `ZoneManager` (`app/core/detection/zone.py`) guarda **un archivo JSON por
-zona** en `data/zones/<zone_id>.json`. El formato del archivo es
-exactamente `Zone.model_dump()` — no hay un formato de datos aparte.
+zona**, agrupados en una subcarpeta por video/cámara:
+`data/zones/<video_id>/<zone_id>.json`. Esto evita que las zonas de un video
+se mezclen con las de otro al cargar. El formato del archivo es exactamente
+`Zone.model_dump()` — no hay un formato de datos aparte.
 
 Ejemplo de un archivo real en este repositorio (`data/zones/`):
 
@@ -171,7 +173,7 @@ def main() -> None:
         "event_schema.md",
         "Esquema de Eventos",
         EVENT_SCHEMA_INTRO,
-        models=[schemas_module.InteractionEvent, schemas_module.PositionSample],
+        models=[schemas_module.InteractionEvent, schemas_module.PositionSample, schemas_module.DwellRecord],
     )
     _write_doc(
         "zone_schema.md",

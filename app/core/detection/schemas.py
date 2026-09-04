@@ -38,6 +38,10 @@ class Zone(BaseModel):
     video_id: str = Field(description="Video/cámara al que pertenece esta zona (evita mezclar zonas entre videos distintos)")
     name: str = Field(description="Nombre legible de la zona (ej: Góndola A1)")
     polygon: List[Tuple[float, float]] = Field(description="Puntos (x, y) que cierran la zona")
+    zone_type: Literal["product", "staff"] = Field(
+        default="product",
+        description="'product' = zona de góndola (dwell time); 'staff' = zona de personal (excluye de métricas de cliente)",
+    )
 
 class ZoneSignal(BaseModel):
     """Señales de interacción entre una persona trackeada y una zona en un frame."""
@@ -62,6 +66,10 @@ class InteractionEvent(BaseModel):
     )
     timestamp: float = Field(description="Segundos traducidos al video original (o wall-clock en vivo)")
     event_id: str = Field(default_factory=_new_event_id, description="UUID para auditoría y deduplicación")
+    is_employee: bool = Field(
+        default=False,
+        description="True si el track fue marcado como empleado (StaffZoneTracker) antes o durante este evento",
+    )
 
 class PositionSample(BaseModel):
     """
@@ -80,3 +88,19 @@ class PositionSample(BaseModel):
         description="Bottom-center del bbox como proxy del pie (x, y)"
     )
     camera_id: str = Field(default="cam_1", description="Escalable a multi-cámara en el futuro")
+    is_employee: bool = Field(
+        default=False,
+        description="True si el track fue marcado como empleado (StaffZoneTracker) al momento de esta muestra",
+    )
+
+
+class DwellRecord(BaseModel):
+    """Registro de tiempo de permanencia de una persona dentro de una zona de producto."""
+    event_type: Literal["dwell"] = "dwell"
+    track_id: int = Field(description="Identificador efímero de la persona en esta sesión")
+    zone_id: str = Field(description="Zona de producto donde se registró la permanencia")
+    entry_timestamp: float = Field(description="Segundos (video original) en que la persona entró a la zona")
+    exit_timestamp: float = Field(description="Segundos (video original) en que la persona salió de la zona")
+    duration_sec: float = Field(description="Duración de la permanencia, en segundos")
+    is_employee: bool = Field(default=False, description="True si el track estaba marcado como empleado al salir de la zona")
+    event_id: str = Field(default_factory=_new_event_id, description="UUID para auditoría y deduplicación")

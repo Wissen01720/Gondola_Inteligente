@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 import sqlite3
 
-from app.core.detection.schemas import InteractionEvent, PositionSample
+from app.core.detection.schemas import InteractionEvent, PositionSample, DwellRecord
 from app.core.detection.event_publisher import InProcessPublisher
 from app.utils.config import EVENT_STORE_DB_PATH
 
@@ -36,21 +36,33 @@ class EventStore:
         self._conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS events (
-                event_id   TEXT PRIMARY KEY,
-                track_id   INTEGER NOT NULL,
-                zone_id    TEXT    NOT NULL,
-                action     TEXT    NOT NULL,
-                timestamp  REAL    NOT NULL
+                event_id     TEXT PRIMARY KEY,
+                track_id     INTEGER NOT NULL,
+                zone_id      TEXT    NOT NULL,
+                action       TEXT    NOT NULL,
+                timestamp    REAL    NOT NULL,
+                is_employee  INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS position_samples (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                track_id    INTEGER NOT NULL,
-                frame_index INTEGER NOT NULL,
-                timestamp   REAL    NOT NULL,
-                foot_x      REAL    NOT NULL,
-                foot_y      REAL    NOT NULL,
-                camera_id   TEXT    NOT NULL
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id     INTEGER NOT NULL,
+                frame_index  INTEGER NOT NULL,
+                timestamp    REAL    NOT NULL,
+                foot_x       REAL    NOT NULL,
+                foot_y       REAL    NOT NULL,
+                camera_id    TEXT    NOT NULL,
+                is_employee  INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS dwell_records (
+                event_id         TEXT PRIMARY KEY,
+                track_id         INTEGER NOT NULL,
+                zone_id          TEXT    NOT NULL,
+                entry_timestamp  REAL    NOT NULL,
+                exit_timestamp   REAL    NOT NULL,
+                duration_sec     REAL    NOT NULL,
+                is_employee      INTEGER NOT NULL DEFAULT 0
             );
             """
         )
@@ -60,9 +72,9 @@ class EventStore:
     def insert_event(self, event: InteractionEvent) -> None:
         """Guarda un evento de interacción."""
         self._conn.execute(
-            "INSERT OR REPLACE INTO events (event_id, track_id, zone_id, action, timestamp) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (event.event_id, event.track_id, event.zone_id, event.action, event.timestamp),
+            "INSERT OR REPLACE INTO events (event_id, track_id, zone_id, action, timestamp, is_employee) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (event.event_id, event.track_id, event.zone_id, event.action, event.timestamp, int(event.is_employee)),
         )
         self._conn.commit()
 
@@ -70,10 +82,21 @@ class EventStore:
         """Guarda una muestra de posición."""
         foot_x, foot_y = sample.foot_position
         self._conn.execute(
-            "INSERT INTO position_samples (track_id, frame_index, timestamp, foot_x, foot_y, camera_id) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO position_samples (track_id, frame_index, timestamp, foot_x, foot_y, camera_id, is_employee) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (sample.track_id, sample.frame_index, sample.original_timestamp_sec,
-             foot_x, foot_y, sample.camera_id),
+             foot_x, foot_y, sample.camera_id, int(sample.is_employee)),
+        )
+        self._conn.commit()
+
+    def insert_dwell_record(self, record: DwellRecord) -> None:
+        """Guarda un registro de tiempo de permanencia (dwell time) en una zona de producto."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO dwell_records "
+            "(event_id, track_id, zone_id, entry_timestamp, exit_timestamp, duration_sec, is_employee) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (record.event_id, record.track_id, record.zone_id, record.entry_timestamp,
+             record.exit_timestamp, record.duration_sec, int(record.is_employee)),
         )
         self._conn.commit()
 
@@ -87,6 +110,8 @@ class EventStore:
         """
         if "foot_position" in payload:
             self.insert_position_sample(PositionSample(**payload))
+        elif "duration_sec" in payload:
+            self.insert_dwell_record(DwellRecord(**payload))
         elif "action" in payload and "event_id" in payload:
             self.insert_event(InteractionEvent(**payload))
         else:
@@ -99,8 +124,11 @@ class EventStore:
     def count_position_samples(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM position_samples").fetchone()[0]
 
+    def count_dwell_records(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM dwell_records").fetchone()[0]
+
     # TODO(Team 3): query_position_samples(rango_tiempo, zone/camera filter),
-    # query_events(zone_id, action), stats por sesión.
+    # query_events(zone_id, action), query_dwell_records(zone_id), stats por sesión.
 
     def close(self) -> None:
         self._conn.close()
