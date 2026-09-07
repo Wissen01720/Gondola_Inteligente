@@ -8,7 +8,7 @@
     1280,
     720
   ],
-  "output_path": "C:\\Users\\Usuario\\Hackaton\\Scapder-Superintendente\\Scapder-Superintendente\\data\\processed\\USA CCTV Market Camera_clean.mp4",
+  "output_path": "C:\\Users\\Usuario\\Hackaton\\data\\processed\\USA CCTV Market Camera_clean.mp4",
   "frame_mapping": [
     {
       "clean_frame": 0,
