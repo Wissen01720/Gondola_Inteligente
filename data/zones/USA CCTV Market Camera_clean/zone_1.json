@@ -1,23 +1,24 @@
 {
     "zone_id": "zone_1",
-    "name": "Estanteria Principal",
+    "video_id": "USA CCTV Market Camera_clean",
+    "name": "Estante 1 derecha",
     "polygon": [
         [
-            100.0,
-            100.0
+            824.66,
+            465.45
         ],
         [
-            800.0,
-            100.0
+            994.15,
+            247.91
         ],
         [
-            800.0,
-            700.0
+            978.97,
+            447.75
         ],
         [
-            100.0,
-            700.0
+            819.6,
+            695.65
         ]
     ],
-    "video_id": "USA CCTV Market Camera_clean"
+    "zone_type": "product"
 }

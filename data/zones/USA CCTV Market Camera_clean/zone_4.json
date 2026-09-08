@@ -1,0 +1,24 @@
+{
+    "zone_id": "zone_4",
+    "video_id": "USA CCTV Market Camera_clean",
+    "name": "Persona 1",
+    "polygon": [
+        [
+            169.49,
+            288.38
+        ],
+        [
+            303.56,
+            295.97
+        ],
+        [
+            346.56,
+            640.0
+        ],
+        [
+            199.84,
+            589.41
+        ]
+    ],
+    "zone_type": "staff"
+}

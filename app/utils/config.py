@@ -78,6 +78,15 @@ EVENTS_LOCAL_LOG_PATH = str(DATA_DIR / "events") # Carpeta de respaldo local mie
 # --- Módulo 3: Almacenamiento de eventos (backend local) ---
 EVENT_STORE_DB_PATH = str(DATA_DIR / "scapder_events.db") # SQLite local para eventos + muestras de posición
 
+# --- UI: snapshots reales para el toggle "Galería" de VideoInfoPanel ---
+# (resuelve la deuda de Fase 7: antes el toggle no tenía datos reales)
+SNAPSHOTS_DIR = DATA_DIR / "snapshots"    # 1 subcarpeta por video, con capturas anotadas (cajas de detección)
+SNAPSHOT_EVERY_N_FRAMES = 15              # cada cuántos frames procesados por el pipeline se guarda 1 snapshot
+
 # Asegurar que existan los directorios
 Path(ZONES_STORAGE_PATH).mkdir(parents=True, exist_ok=True)
 Path(EVENTS_LOCAL_LOG_PATH).mkdir(parents=True, exist_ok=True)
+SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# --- UI: identidad visual (Header/Footer) ---
+ENGINE_VERSION = "VISION_ENGINE v2.4.0-STABLE"

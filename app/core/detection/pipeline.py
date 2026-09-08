@@ -6,7 +6,7 @@ vivo con timestamps wall-clock) y orquesta: tracking, pose, señales de
 zona, máquina de estados, trayectoria continua y publicación de eventos.
 """
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 from app.core.ingestion.frame_source import FrameSource, VideoFileFrameSource
 from app.core.detection.tracker import PersonTracker
@@ -47,6 +47,7 @@ class DetectionPipeline:
         self,
         source: Union[FrameSource, str, Path],
         progress_callback: Optional = None,
+        frame_callback: Optional[Callable[..., None]] = None,
     ) -> None:
         """
         Ejecuta el pipeline sobre una fuente de frames.
@@ -56,6 +57,11 @@ class DetectionPipeline:
         construye internamente un `VideoFileFrameSource`.
         `progress_callback(frame_index)` se invoca por cada frame procesado
         (opcional; usado por workers de QThread).
+        `frame_callback(frame, tracked_people, pose_results)` se invoca por
+        cada frame, justo después de tracking + pose (opcional; usado por
+        la UI para mostrar el video anotado en vivo). Si no se pasa nada,
+        el comportamiento del pipeline es idéntico al de antes de este
+        parámetro.
         """
         if isinstance(source, (str, Path)):
             source = VideoFileFrameSource(source)
@@ -79,7 +85,13 @@ class DetectionPipeline:
                 # 2. Estimar pose
                 pose_results = self.pose_estimator.estimate(sample.frame, frame_index, tracked_people)
 
-                # 2.5 Estimar posición de pies, detectar staff y medir dwell time.
+                # 2.5 Exponer frame + detecciones a quien llame el pipeline
+                # (por ejemplo la UI, para dibujar cajas/keypoints en vivo).
+                # No afecta el resto del flujo: es solo un "aviso" hacia afuera.
+                if frame_callback:
+                    frame_callback(sample.frame, tracked_people, pose_results)
+
+                # 2.6 Estimar posición de pies, detectar staff y medir dwell time.
                 # Se hace cada frame (no cada N frames como TrajectoryCapture)
                 # porque tanto la detección de staff como el dwell time
                 # necesitan precisión temporal fina para no perder entradas/
