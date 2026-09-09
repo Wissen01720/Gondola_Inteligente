@@ -4,4 +4,5 @@ numpy>=1.26.0
 ultralytics
 shapely
 pydantic
+psutil
 pytest

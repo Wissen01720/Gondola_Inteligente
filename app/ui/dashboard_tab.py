@@ -583,6 +583,12 @@ class DashboardTab(QWidget):
 
     # ------------------------------------------------------------ refresco --
     def refresh(self):
+        # Relee la geometría de zonas desde disco en cada refresco (no solo
+        # al cambiar de sesión): si en la pestaña "Edición de Zonas" se
+        # movieron puntos y se sobreescribió el JSON, el heatmap los
+        # refleja en el siguiente tick (<=3s) sin tener que tocar el combo.
+        self._load_zone_names()
+
         summary = self.store.get_summary()
         zone_rows = self.store.get_zone_breakdown()
         timeline = self.store.get_timeline(bucket_sec=30.0)

@@ -51,6 +51,11 @@ class DetectionPipelineWorker(QThread):
                 self.source,
                 progress_callback=self._on_progress,
                 frame_callback=frame_callback,
+                # `requestInterruption()`/`isInterruptionRequested()` es el
+                # mecanismo estándar de QThread para pedir parar sin bloquear
+                # quien lo pide — así el botón "Reiniciar" de la UI no tiene
+                # que esperar a que el video termine de procesarse.
+                should_stop=self.isInterruptionRequested,
             )
             self.pipeline_finished.emit(self._frames_processed)
         except Exception as exc:  # noqa: BLE001 - reportar cualquier fallo del pipeline

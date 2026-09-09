@@ -17,6 +17,22 @@ from app.utils.config import ZONES_STORAGE_PATH, ARM_EXTENSION_MIN_RATIO, MIN_KE
 _polygon_cache: Dict[str, Polygon] = {}
 
 
+def normalize_video_id(video_id: str) -> str:
+    """
+    Normaliza un `video_id` a la forma canónica de la sesión.
+
+    El pipeline real siempre corre sobre el video ya limpiado
+    (`<nombre>_clean.mp4`, ver `app/core/ingestion/video_cleaner.py`), así
+    que sus zonas siempre deberían vivir en `data/zones/<nombre>_clean/`.
+    Si en el editor de zonas se cargó el video crudo (sin limpiar) como
+    frame de referencia, sin esto se crearía una segunda carpeta de zonas
+    (`<nombre>` además de `<nombre>_clean`) para lo que en realidad es la
+    misma sesión — el bug reportado de "carpetas duplicadas" en
+    `data/zones/`.
+    """
+    return video_id if video_id.endswith("_clean") else f"{video_id}_clean"
+
+
 def _get_cached_polygon(zone: Zone) -> Polygon:
     cache_key = f"{zone.zone_id}:{zone.video_id}:{tuple(zone.polygon)}"
     poly = _polygon_cache.get(cache_key)
@@ -40,8 +56,15 @@ class ZoneManager:
         self.storage_path.mkdir(parents=True, exist_ok=True)
 
     def save_zone(self, zone: Zone) -> None:
-        """Guarda una zona en un archivo JSON, dentro de la subcarpeta de su video."""
-        video_dir = self.storage_path / zone.video_id
+        """
+        Guarda una zona en un archivo JSON, dentro de la subcarpeta de su
+        video (sobreescribe si `zone.zone_id` ya existe — así una edición
+        de puntos actualiza el mismo archivo en vez de crear uno nuevo).
+        """
+        video_id = normalize_video_id(zone.video_id)
+        if video_id != zone.video_id:
+            zone = zone.model_copy(update={"video_id": video_id})
+        video_dir = self.storage_path / video_id
         video_dir.mkdir(parents=True, exist_ok=True)
         file_path = video_dir / f"{zone.zone_id}.json"
         with open(file_path, "w", encoding="utf-8") as f:
@@ -50,7 +73,7 @@ class ZoneManager:
     def load_zones(self, video_id: str) -> List[Zone]:
         """Carga las zonas guardadas para un video/cámara específico (no mezcla con otros)."""
         zones = []
-        video_dir = self.storage_path / video_id
+        video_dir = self.storage_path / normalize_video_id(video_id)
         if not video_dir.exists():
             return zones
         for file_path in video_dir.glob("*.json"):
@@ -71,7 +94,7 @@ class ZoneManager:
         existía (no lanza excepción en ese caso: para la UI, "ya no
         existe" y "se acaba de borrar" tienen el mismo resultado neto).
         """
-        file_path = self.storage_path / video_id / f"{zone_id}.json"
+        file_path = self.storage_path / normalize_video_id(video_id) / f"{zone_id}.json"
         if not file_path.exists():
             return False
         file_path.unlink()

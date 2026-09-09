@@ -48,6 +48,7 @@ class DetectionPipeline:
         source: Union[FrameSource, str, Path],
         progress_callback: Optional = None,
         frame_callback: Optional[Callable[..., None]] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> None:
         """
         Ejecuta el pipeline sobre una fuente de frames.
@@ -62,6 +63,11 @@ class DetectionPipeline:
         la UI para mostrar el video anotado en vivo). Si no se pasa nada,
         el comportamiento del pipeline es idéntico al de antes de este
         parámetro.
+        `should_stop()` se consulta al inicio de cada frame; si devuelve
+        True, el loop termina de inmediato (igual que agotar la fuente) —
+        permite cancelar un análisis en curso sin esperar a que termine el
+        video completo (ej. `QThread.requestInterruption`, ver
+        `DetectionPipelineWorker`).
         """
         if isinstance(source, (str, Path)):
             source = VideoFileFrameSource(source)
@@ -73,6 +79,9 @@ class DetectionPipeline:
         frames_processed = 0
         try:
             while True:
+                if should_stop and should_stop():
+                    break
+
                 sample = source.next_frame()
                 if sample is None:
                     break

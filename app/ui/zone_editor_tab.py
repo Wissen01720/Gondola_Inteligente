@@ -39,7 +39,7 @@ from app.core.detection.pose import PoseEstimator
 from app.core.detection.schemas import Zone
 from app.core.detection.state_machine import InteractionState, InteractionStateMachine
 from app.core.detection.tracker import PersonTracker
-from app.core.detection.zone import ZoneManager
+from app.core.detection.zone import ZoneManager, normalize_video_id
 from app.core.ingestion.frame_source import VideoFileFrameSource
 from app.core.ingestion.video_loader import VideoLoadError, extract_thumbnail, load_video
 from app.ui.theme import Colors
@@ -220,6 +220,15 @@ class ZoneEditorTab(QWidget):
         # (IDLE/REACHING/HOLDING) está cada (track_id, zone_id) y así
         # colorear/etiquetar igual que `scripts/run_pipeline_debug.py`.
         self._debug_state_machine: Optional[InteractionStateMachine] = None
+        # zone_id de la zona guardada que se está editando ahora mismo (sus
+        # puntos viven ya cargados en self.canvas.points); None = se está
+        # dibujando una zona nueva. Ver `_on_zone_selected`/`_on_save`.
+        self._editing_zone_id: Optional[str] = None
+        # Workers de debug que ya se pidieron interrumpir (`_stop_debug_worker`)
+        # pero cuyo hilo real puede seguir vivo un instante más: se guarda la
+        # referencia acá (en vez de perderla al reasignar `_debug_worker`)
+        # para que Qt no lo destruya mientras el QThread sigue corriendo.
+        self._retiring_workers: List[DetectionPipelineWorker] = []
         self._build_ui()
         self._refresh_zone_list()
 
@@ -276,11 +285,12 @@ class ZoneEditorTab(QWidget):
         self.btn_clear.clicked.connect(self._on_clear)
         self.btn_debug = QPushButton(" Ver detección (debug)")
         self.btn_debug.clicked.connect(self.on_run_debug)
-        self.btn_reset = QPushButton("Reiniciar / cargar otro video")
+        self.btn_reset = QPushButton("Reiniciar")
         self.btn_reset.setToolTip(
-            "Descarta el video y las zonas en construcción de esta pantalla "
-            "(las zonas ya guardadas no se tocan) y abre el selector para "
-            "analizar un video distinto, sin cerrar la aplicación."
+            "Detiene el debug en curso (si hay uno, sin esperar a que termine "
+            "el video), descarta el video y la zona en construcción de esta "
+            "pantalla (las zonas ya guardadas no se tocan) y abre el selector "
+            "para analizar un video distinto, sin cerrar la aplicación."
         )
         self.btn_reset.clicked.connect(self._on_reset_session)
 
@@ -382,7 +392,12 @@ class ZoneEditorTab(QWidget):
             if image.isNull():
                 raise VideoLoadError(f"No se pudo leer la miniatura: {thumb_path}")
             self.canvas.set_frame(image)
-            self._current_video_id = video_info.path.stem
+            self._editing_zone_id = None
+            # normalize_video_id: si se cargó el video crudo (sin limpiar)
+            # como referencia, sus zonas igual quedan bajo el mismo
+            # "<nombre>_clean" que usará el pipeline real — evita crear una
+            # segunda carpeta en data/zones/ para la misma sesión.
+            self._current_video_id = normalize_video_id(video_info.path.stem)
             self._current_video_path = video_info.path
             self._current_video_fps = video_info.fps or 30.0
             self.header.set_source_name(video_info.filename)
@@ -399,6 +414,7 @@ class ZoneEditorTab(QWidget):
     def _on_clear(self):
         self.canvas.clear_points()
         self.name_input.clear()
+        self._editing_zone_id = None
         self._refresh_zone_list()
 
     def _on_type_changed(self, _index: int = 0):
@@ -428,34 +444,69 @@ class ZoneEditorTab(QWidget):
             )
         self.canvas.set_draw_color(QColor(color))
 
+    def _stop_debug_worker(self):
+        """
+        Pide interrumpir el debug en curso (si hay uno) sin bloquear la UI
+        esperando a que termine — `requestInterruption()` es cooperativo:
+        `DetectionPipeline.run()` lo consulta al inicio de cada frame
+        (`should_stop`) y corta ahí, pero el hilo real puede tardar hasta
+        ese chequeo en salir.
+
+        Para no esperar ese instante (`QThread.wait()` bloquearía la UI),
+        se desconectan sus señales — cualquier `frame_processed`/
+        `pipeline_finished` que llegue después de esto ya no hace nada — y
+        se guarda la referencia en `_retiring_workers` únicamente para que
+        Qt no destruya el QThread mientras el hilo real todavía sigue vivo.
+        """
+        worker = self._debug_worker
+        if worker is None:
+            return
+
+        worker.requestInterruption()
+        for signal, slot in (
+            (worker.frame_processed, self._on_debug_frame),
+            (worker.pipeline_finished, self._on_debug_finished),
+            (worker.pipeline_failed, self._on_debug_failed),
+            (worker.progress_updated, self.footer.note_frame_progress),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass  # ya estaba desconectada
+
+        self._retiring_workers.append(worker)
+        worker.finished.connect(lambda w=worker: self._retiring_workers.remove(w) if w in self._retiring_workers else None)
+
+        self._debug_worker = None
+        self._debug_state_machine = None
+        self.btn_debug.setEnabled(True)
+        self.btn_load.setEnabled(True)
+
     def _on_reset_session(self):
         """
-        Descarta el video/zona en construcción de esta pantalla y abre el
-        selector de archivo para cargar uno nuevo — evita tener que cerrar
-        y reabrir la app para analizar un video distinto.
+        Detiene cualquier debug en curso (sin esperar a que el video
+        termine), descarta el video/zona en construcción de esta pantalla,
+        y abre el selector de archivo para cargar uno nuevo — evita tener
+        que cerrar y reabrir la app para analizar un video distinto.
 
         No borra ninguna zona ya guardada en disco (esas viven por
         video_id, vía ZoneManager): solo resetea el estado en memoria de
         este tab.
         """
-        if self._debug_worker is not None and self._debug_worker.isRunning():
-            QMessageBox.warning(
-                self, "Debug en curso",
-                "Espera a que termine el debug actual (o ciérralo) antes de reiniciar.",
-            )
-            return
+        self._stop_debug_worker()
 
         self.canvas._image = None  # vuelve al estado "sin video" (placeholder del lienzo)
         self.canvas.points = []
         self.canvas.existing_zone = None
         self.canvas.update()
         self.name_input.clear()
+        self._editing_zone_id = None
         self._current_video_id = None
         self._current_video_path = None
         self._current_video_fps = 30.0
         self._debug_reference_image = None
         self._debug_zones = []
-        self._debug_state_machine = None
+        self.footer.reset_fps()
         self.header.set_source_name("VISION_ZONE_05")
         self._refresh_zone_list()
         self._log(" Sesión reiniciada — selecciona el nuevo video a analizar.")
@@ -513,10 +564,12 @@ class ZoneEditorTab(QWidget):
 
         self._debug_reference_image = self.canvas._image
 
+        self.footer.reset_fps()
         self._debug_worker = DetectionPipelineWorker(pipeline, source, frame_every_n=frame_every_n)
         self._debug_worker.frame_processed.connect(self._on_debug_frame)
         self._debug_worker.pipeline_finished.connect(self._on_debug_finished)
         self._debug_worker.pipeline_failed.connect(self._on_debug_failed)
+        self._debug_worker.progress_updated.connect(self.footer.note_frame_progress)
 
         self.btn_debug.setEnabled(False)
         self.btn_load.setEnabled(False)
@@ -672,15 +725,23 @@ class ZoneEditorTab(QWidget):
             QMessageBox.warning(self, "Sin nombre", "Escribe un nombre para la zona.")
             return
 
-        zone_id = self._next_zone_id()
+        # Si se venía editando una zona guardada (`_on_zone_selected` cargó
+        # sus puntos en el lienzo), se reusa el mismo zone_id — save_zone()
+        # sobreescribe ese JSON en vez de crear uno nuevo. El heatmap del
+        # Dashboard, que relee las zonas del disco en cada refresco, queda
+        # así con los puntos actualizados sin ningún paso extra.
+        is_edit = self._editing_zone_id is not None
+        zone_id = self._editing_zone_id or self._next_zone_id()
         polygon = [(round(x, 2), round(y, 2)) for (x, y) in self.canvas.points]
         zone_type = self.type_combo.currentData()
         zone = Zone(zone_id=zone_id, video_id=self._current_video_id, name=name, polygon=polygon, zone_type=zone_type)
         self.zone_manager.save_zone(zone)
-        self._log(f"✅ Zona guardada: {zone_id} — {name} ({len(polygon)} vértices, tipo={zone_type}) [{self._current_video_id}]")
+        verb = "actualizada" if is_edit else "guardada"
+        self._log(f"✅ Zona {verb}: {zone_id} — {name} ({len(polygon)} vértices, tipo={zone_type}) [{self._current_video_id}]")
 
         self.name_input.clear()
         self.canvas.clear_points()
+        self._editing_zone_id = None
         self._refresh_zone_list()
 
     def _next_zone_id(self) -> str:
@@ -708,13 +769,14 @@ class ZoneEditorTab(QWidget):
         self._zones = {}
 
         if self.canvas.points:
+            status = f"Editando {self._editing_zone_id}" if self._editing_zone_id else "Dibujando"
             self._add_zone_row(
                 name=self.name_input.text().strip() or "(sin nombre aún)",
                 nodes=len(self.canvas.points),
                 area_px=0.0,
-                zone_type="—",
-                status="Dibujando",
-                zone_id=None,
+                zone_type=self.type_combo.currentData() if self._editing_zone_id else "—",
+                status=status,
+                zone_id=None,  # fila "en vivo": clickearla no debe recargar la versión guardada
             )
 
         if self._current_video_id is None:
@@ -722,6 +784,8 @@ class ZoneEditorTab(QWidget):
 
         self._zones = {z.zone_id: z for z in self.zone_manager.load_zones(self._current_video_id)}
         for zone_id, zone in self._zones.items():
+            if zone_id == self._editing_zone_id:
+                continue  # ya se muestra arriba, con los puntos en vivo del lienzo
             self._add_zone_row(
                 name=zone.name,
                 nodes=len(zone.polygon),
@@ -786,20 +850,42 @@ class ZoneEditorTab(QWidget):
         self.zone_manager.delete_zone(self._current_video_id, zone_id)
         self._log(f" Zona eliminada: {zone_id} — {name}")
         self.canvas.existing_zone = None
+        if self._editing_zone_id == zone_id:
+            # Se borró justo la zona que estaba en edición: no queda nada
+            # válido que sobreescribir, así que se descarta el borrador.
+            self.canvas.clear_points()
+            self.name_input.clear()
+            self._editing_zone_id = None
         self.canvas.update()
         self._refresh_zone_list()
 
     def _on_zone_selected(self):
+        """
+        Selecciona una zona guardada de la lista para **editarla**: sus
+        puntos se cargan en el lienzo (agregables/editables como cualquier
+        polígono en construcción) y "Guardar zona" sobreescribe el mismo
+        JSON en vez de crear uno nuevo (ver `_on_save`).
+        """
         items = self.zone_list.selectedItems()
         if not items:
             return
         zone_id = items[0].data(Qt.UserRole)
         if zone_id is None:
-            return  # es la fila "(Drawing)", no una zona guardada
+            return  # es la fila "en construcción/edición", no una zona guardada distinta
         zone = self._zones.get(zone_id)
-        if zone and self.canvas.has_frame():
-            self.canvas.existing_zone = zone
-            self.canvas.update()
+        if not zone or not self.canvas.has_frame():
+            return
+
+        self._editing_zone_id = zone_id
+        self.canvas.existing_zone = None
+        self.canvas.points = list(zone.polygon)
+        self.name_input.setText(zone.name)
+        type_index = self.type_combo.findData(zone.zone_type)
+        if type_index >= 0:
+            self.type_combo.setCurrentIndex(type_index)  # dispara _on_type_changed (color/banner)
+        self.canvas.update()
+        self._refresh_zone_list()
+        self._log(f" Editando zona {zone_id} — modifica los puntos y presiona 'Guardar zona'.")
 
     def _log(self, message: str):
         self.log_area.append(message)

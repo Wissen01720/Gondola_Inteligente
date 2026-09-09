@@ -344,6 +344,7 @@ class VideoIngestTab(QWidget):
         self.btn_clean_all.setEnabled(False)
         self.progress_bar.setValue(0)
 
+        self.footer.reset_fps()
         self.worker = VideoCleaningWorker(videos_to_clean)
         self.worker.progress_updated.connect(self._on_progress)
         self.worker.video_finished.connect(self._on_video_finished)
@@ -356,6 +357,7 @@ class VideoIngestTab(QWidget):
     def _on_progress(self, filename: str, current: int, total: int):
         pct = int((current / total) * 100) if total else 0
         self.progress_bar.setValue(pct)
+        self.footer.note_frame_progress(current)
 
     def _on_video_finished(self, filename: str, report: dict):
         video_info = self.videos[filename]
