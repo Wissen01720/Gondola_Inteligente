@@ -59,8 +59,9 @@ class VideoIngestTab(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # --- Header ---
-        self.header = HeaderBar("VISION_CORE_05")
+        # --- Header --- (sin botón de acción: no había ninguna "Configuración"
+        # real conectada a él en esta pestaña)
+        self.header = HeaderBar("VISION_CORE_05", show_action=False)
         main_layout.addWidget(self.header)
 
         # --- Cuerpo: dos columnas ---
@@ -399,9 +400,10 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(VideoIngestTab(), "1. Carga y Limpieza de Video")
         tabs.addTab(ZoneEditorTab(), "2. Edición de Zonas (ROI)")
-        # Futuras pestañas (ya con el espacio reservado en la arquitectura):
-        # tabs.addTab(DetectionTab(), "3. Detección y Tracking")
-        # tabs.addTab(InteractionTab(), "4. Eventos de Interacción")
-        tabs.addTab(DashboardTab(), "5. Dashboard de Métricas")
+        tabs.addTab(DashboardTab(), "3. Dashboard de Métricas")
+        # Futuras pestañas (cuando se agreguen, Dashboard pasa a ser la 5.a
+        # y estas dos ocupan los números 3/4 antes que ella):
+        # tabs.addTab(DetectionTab(), "N. Detección y Tracking")
+        # tabs.addTab(InteractionTab(), "N. Eventos de Interacción")
 
         self.setCentralWidget(tabs)

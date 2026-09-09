@@ -42,9 +42,14 @@ from app.core.detection.tracker import PersonTracker
 from app.core.detection.zone import ZoneManager
 from app.core.ingestion.frame_source import VideoFileFrameSource
 from app.core.ingestion.video_loader import VideoLoadError, extract_thumbnail, load_video
+from app.ui.theme import Colors
 from app.ui.widgets.footer import FooterBar
 from app.ui.widgets.header import HeaderBar
 from app.utils.config import LOGS_DIR
+
+# Colores por rol de zona, consistentes con el heatmap del Dashboard
+# (app/ui/dashboard_tab.py): producto = azul info, personal = ámbar.
+ZONE_TYPE_COLOR = {"product": Colors.INFO_BLUE, "staff": Colors.WARNING}
 
 
 def _polygon_area_px(points: List[Tuple[float, float]]) -> float:
@@ -74,14 +79,22 @@ class InfoBanner(QFrame):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(2)
 
-        title_label = QLabel(f"\u24D8  {title}")  # símbolo "ⓘ"
-        title_label.setObjectName("sectionTitle")
-        layout.addWidget(title_label)
+        self.title_label = QLabel()
+        self.title_label.setObjectName("sectionTitle")
+        layout.addWidget(self.title_label)
 
-        desc_label = QLabel(description)
-        desc_label.setObjectName("mutedText")
-        desc_label.setWordWrap(True)
-        layout.addWidget(desc_label)
+        self.desc_label = QLabel()
+        self.desc_label.setObjectName("mutedText")
+        self.desc_label.setWordWrap(True)
+        layout.addWidget(self.desc_label)
+
+        self.set_content(title, description)
+
+    def set_content(self, title: str, description: str):
+        """Actualiza el título/descripción sin reconstruir el widget
+        (usado al cambiar el rol de zona: producto vs. personal)."""
+        self.title_label.setText(f"ⓘ  {title}")
+        self.desc_label.setText(description)
 
 
 class ZoneCanvas(QWidget):
@@ -96,6 +109,10 @@ class ZoneCanvas(QWidget):
         self._scale = 1.0
         self.points: List[Tuple[float, float]] = []
         self.existing_zone: Optional[Zone] = None  # zona guardada seleccionada (overlay azul)
+        # Color del polígono en construcción: cambia según el rol elegido en
+        # el combo "Tipo" (producto/personal), para que quede visualmente
+        # claro para cuál de los dos se están agregando puntos.
+        self._draw_color = QColor("#D8C61A")
 
     # ------------------------------------------------------------- API --
     def set_frame(self, image: QImage) -> None:
@@ -103,6 +120,11 @@ class ZoneCanvas(QWidget):
         self._image = image
         self.points = []
         self.existing_zone = None
+        self.update()
+
+    def set_draw_color(self, color: QColor) -> None:
+        """Cambia el color de los puntos/línea en construcción (rol de zona)."""
+        self._draw_color = color
         self.update()
 
     def has_frame(self) -> bool:
@@ -170,12 +192,12 @@ class ZoneCanvas(QWidget):
             for p in pts:
                 painter.drawEllipse(p, 3, 3)
 
-        # Polígono en construcción — puntos en amarillo de marca
+        # Polígono en construcción — color según el rol de zona seleccionado
         pts = [self._image_to_widget(x, y) for (x, y) in self.points]
         if pts:
-            painter.setPen(QPen(QColor("#D8C61A"), 2))
+            painter.setPen(QPen(self._draw_color, 2))
             painter.drawPolyline(pts + [pts[0]])
-            painter.setBrush(QColor("#D8C61A"))
+            painter.setBrush(self._draw_color)
             painter.setPen(Qt.NoPen)
             for p in pts:
                 painter.drawEllipse(p, 4, 4)
@@ -205,7 +227,9 @@ class ZoneEditorTab(QWidget):
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
 
-        self.header = HeaderBar(source_name="VISION_ZONE_05")
+        # show_action=False: esta pestaña no tenía ninguna "Configuración"
+        # real conectada al engranaje.
+        self.header = HeaderBar(source_name="VISION_ZONE_05", show_action=False)
         main_layout.addWidget(self.header)
 
         # --- Zona central: panel de zonas (izquierda) + lienzo (derecha, más grande) ---
@@ -214,6 +238,11 @@ class ZoneEditorTab(QWidget):
         splitter.addWidget(self._build_canvas_section())
         splitter.setSizes([300, 780])  # el lienzo ahora domina el espacio
         main_layout.addWidget(splitter, stretch=1)
+
+        # El combo "Tipo" vive en el panel de zonas (construido primero) pero
+        # actualiza el banner/color del lienzo (construido después) — se
+        # aplica el estado inicial acá, una vez que ambos ya existen.
+        self._on_type_changed()
 
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
@@ -247,12 +276,20 @@ class ZoneEditorTab(QWidget):
         self.btn_clear.clicked.connect(self._on_clear)
         self.btn_debug = QPushButton(" Ver detección (debug)")
         self.btn_debug.clicked.connect(self.on_run_debug)
+        self.btn_reset = QPushButton("Reiniciar / cargar otro video")
+        self.btn_reset.setToolTip(
+            "Descarta el video y las zonas en construcción de esta pantalla "
+            "(las zonas ya guardadas no se tocan) y abre el selector para "
+            "analizar un video distinto, sin cerrar la aplicación."
+        )
+        self.btn_reset.clicked.connect(self._on_reset_session)
 
         actions.addWidget(self.btn_load)
         actions.addWidget(self.btn_undo)
         actions.addWidget(self.btn_clear)
         actions.addWidget(self.btn_debug)
         actions.addStretch()
+        actions.addWidget(self.btn_reset)
         layout.addLayout(actions)
 
         return container
@@ -280,16 +317,26 @@ class ZoneEditorTab(QWidget):
         layout.addLayout(name_row)
 
         type_row = QHBoxLayout()
-        type_row.addWidget(QLabel("Tipo:"))
+        type_row.addWidget(QLabel("Rol de la zona:"))
         self.type_combo = QComboBox()
-        # Los únicos dos valores que el esquema `Zone.zone_type` acepta hoy.
-        self.type_combo.addItem("Góndola / producto (dwell time)", userData="product")
-        self.type_combo.addItem("Personal (excluida de métricas)", userData="staff")
+        # Los únicos dos valores que el esquema `Zone.zone_type` acepta hoy:
+        # "product" (góndola, dwell time de cliente) y "staff" (personal de
+        # la tienda/establecimiento — puntos aparte de los de la góndola,
+        # excluidos de las métricas de cliente vía StaffZoneTracker).
+        self.type_combo.addItem("Góndola / producto (dwell time de cliente)", userData="product")
+        self.type_combo.addItem("Personal de la tienda (excluida de métricas)", userData="staff")
+        self.type_combo.currentIndexChanged.connect(self._on_type_changed)
         type_row.addWidget(self.type_combo, stretch=1)
+
+        self.type_color_dot = QLabel()
+        self.type_color_dot.setFixedSize(12, 12)
+        type_row.addWidget(self.type_color_dot)
         layout.addLayout(type_row)
 
         hint = QLabel(
-            "Haz click sobre el frame para agregar vértices. Mínimo 3 puntos."
+            "Elige el rol arriba y haz click sobre el frame para agregar sus "
+            "vértices — cada zona guardada queda con ese rol (góndola o "
+            "personal). Mínimo 3 puntos."
         )
         hint.setObjectName("mutedText")
         hint.setWordWrap(True)
@@ -353,6 +400,67 @@ class ZoneEditorTab(QWidget):
         self.canvas.clear_points()
         self.name_input.clear()
         self._refresh_zone_list()
+
+    def _on_type_changed(self, _index: int = 0):
+        """
+        Cambia de rol de zona (góndola/producto vs. personal): actualiza el
+        color con el que se dibujan los puntos en construcción y el aviso
+        sobre el lienzo, para que sea obvio para cuál de los dos rieles se
+        están agregando vértices en este momento.
+        """
+        zone_type = self.type_combo.currentData()
+        color = ZONE_TYPE_COLOR.get(zone_type, ZONE_TYPE_COLOR["product"])
+        self.type_color_dot.setStyleSheet(f"background-color:{color}; border-radius:6px;")
+
+        if zone_type == "staff":
+            self.banner.set_content(
+                "Modo de dibujo de ROI's — Personal",
+                "Dibuja las áreas donde suele ubicarse el personal de la tienda o "
+                "establecimiento (caja, mostrador, bodega...), aparte de las de "
+                "góndola. StaffZoneTracker las usa para excluir a los empleados "
+                "de las métricas de cliente.",
+            )
+        else:
+            self.banner.set_content(
+                "Modo de dibujo de ROI's — Producto",
+                "Dibuja o edita cómo están las áreas en donde los clientes "
+                "sacan y ponen los productos de las góndolas.",
+            )
+        self.canvas.set_draw_color(QColor(color))
+
+    def _on_reset_session(self):
+        """
+        Descarta el video/zona en construcción de esta pantalla y abre el
+        selector de archivo para cargar uno nuevo — evita tener que cerrar
+        y reabrir la app para analizar un video distinto.
+
+        No borra ninguna zona ya guardada en disco (esas viven por
+        video_id, vía ZoneManager): solo resetea el estado en memoria de
+        este tab.
+        """
+        if self._debug_worker is not None and self._debug_worker.isRunning():
+            QMessageBox.warning(
+                self, "Debug en curso",
+                "Espera a que termine el debug actual (o ciérralo) antes de reiniciar.",
+            )
+            return
+
+        self.canvas._image = None  # vuelve al estado "sin video" (placeholder del lienzo)
+        self.canvas.points = []
+        self.canvas.existing_zone = None
+        self.canvas.update()
+        self.name_input.clear()
+        self._current_video_id = None
+        self._current_video_path = None
+        self._current_video_fps = 30.0
+        self._debug_reference_image = None
+        self._debug_zones = []
+        self._debug_state_machine = None
+        self.header.set_source_name("VISION_ZONE_05")
+        self._refresh_zone_list()
+        self._log(" Sesión reiniciada — selecciona el nuevo video a analizar.")
+
+        self._on_load_video()
 
     # ------------------------------------------------- debug de detección --
     def on_run_debug(self):
@@ -630,9 +738,18 @@ class ZoneEditorTab(QWidget):
         row_layout.setContentsMargins(6, 4, 6, 4)
         row_layout.setSpacing(1)
 
+        name_row = QHBoxLayout()
+        name_row.setSpacing(6)
+        color = ZONE_TYPE_COLOR.get(zone_type)
+        if color:
+            dot = QLabel()
+            dot.setFixedSize(9, 9)
+            dot.setStyleSheet(f"background-color:{color}; border-radius:4px;")
+            name_row.addWidget(dot)
         name_label = QLabel(name)
         name_label.setObjectName("sectionTitle")
-        row_layout.addWidget(name_label)
+        name_row.addWidget(name_label, stretch=1)
+        row_layout.addLayout(name_row)
 
         area_text = f"{area_px:,.0f} px²" if area_px > 0 else "--"
         detail_label = QLabel(

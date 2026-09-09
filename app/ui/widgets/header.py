@@ -1,3 +1,5 @@
+from typing import Optional
+
 from PySide6.QtCore import Qt, QPointF, QRectF, QSize, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton
@@ -78,13 +80,14 @@ class HeaderBar(QFrame):
     # Señal vacía: solo avisa "se apretó settings", sin pasar datos.
     settings_clicked = Signal()
 
-    def __init__(self, source_name: str = "", parent=None):
+    def __init__(self, source_name: str = "", show_action: bool = True, parent=None):
         super().__init__(parent)
         # "panel" ya tiene estilo definido en theme.py (fondo + borde).
         self.setObjectName("panel")
-        self._build_ui(source_name)
+        self.btn_settings: Optional[QPushButton] = None
+        self._build_ui(source_name, show_action)
 
-    def _build_ui(self, source_name: str):
+    def _build_ui(self, source_name: str, show_action: bool):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 6, 12, 6)
 
@@ -92,15 +95,19 @@ class HeaderBar(QFrame):
         self.source_label.setObjectName("monoTag")  # estilo mono + amarillo, de theme.py
         layout.addWidget(self.source_label)
 
-        layout.addStretch()  # empuja el botón de settings hacia la derecha
+        layout.addStretch()  # empuja el botón de acción hacia la derecha (si existe)
 
-        self.btn_settings = QPushButton()
-        self.btn_settings.setIcon(_create_gear_icon())
-        self.btn_settings.setIconSize(QSize(18, 18))
-        self.btn_settings.setFixedWidth(32)
-        self.btn_settings.setToolTip("Configuración")
-        self.btn_settings.clicked.connect(self.settings_clicked.emit)
-        layout.addWidget(self.btn_settings)
+        # `show_action=False`: tabs sin ninguna acción real conectada a este
+        # botón (Carga de video, Edición de zonas) no lo muestran — un
+        # engranaje que no hace nada es peor que no tener botón.
+        if show_action:
+            self.btn_settings = QPushButton()
+            self.btn_settings.setIcon(_create_gear_icon())
+            self.btn_settings.setIconSize(QSize(18, 18))
+            self.btn_settings.setFixedWidth(32)
+            self.btn_settings.setToolTip("Configuración")
+            self.btn_settings.clicked.connect(self.settings_clicked.emit)
+            layout.addWidget(self.btn_settings)
 
     def set_source_name(self, name: str):
         """Actualiza el texto de la fuente sin reconstruir el widget entero"""
@@ -112,6 +119,10 @@ class HeaderBar(QFrame):
         engranaje de "Configuración"). El botón sigue emitiendo la misma
         señal `settings_clicked` — cada tab decide qué significa ese click
         conectándose a ella; no todos los tabs necesitan un settings real.
+
+        No-op si este HeaderBar se construyó con `show_action=False`.
         """
+        if self.btn_settings is None:
+            return
         self.btn_settings.setIcon(icon)
         self.btn_settings.setToolTip(tooltip)
