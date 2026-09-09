@@ -3,10 +3,15 @@
 Prototipo de escritorio para el reto de space management con visión
 computacional (Scapder). Este repositorio cubre, en capas incrementales:
 
-- **Módulo 1: Carga y Limpieza de Video** — ingesta, validación y reencode.
-- **Módulo 2: Detección y Eventos** — tracking, pose, zonas e interacciones.
+- **Módulo 1: Carga y Limpieza de Video** — ingesta, validación (incluida
+  seguridad contra archivos maliciosos/corruptos) y reencode.
+- **Módulo 2: Detección y Eventos** — tracking, pose, zonas, interacciones
+  (`taken`/`returned`), dwell time y detección de personal.
 - **Módulo 3: Trayectoria, Transporte y Backend Local** — muestras continuas
   de posición (heatmaps), bus de eventos in-process y almacenamiento SQLite.
+- **Módulo 4: Dashboard de Métricas** — KPIs, serie temporal, ranking de
+  zonas, mapa de calor de circulación de clientes y feed de eventos, todo
+  dentro de la misma app de escritorio.
 
 ---
 
@@ -29,19 +34,24 @@ computacional (Scapder). Este repositorio cubre, en capas incrementales:
    - [5.3 Transporte in-process (señales Qt)](#53-transporte-in-process-señales-qt)
    - [5.4 Edición de zonas (ROI) en la UI](#54-edición-de-zonas-roi-en-la-ui)
    - [5.5 Backend local (SQLite + heatmap)](#55-backend-local-sqlite--heatmap)
-6. [Contratos de datos documentados](#6-contratos-de-datos-documentados)
-7. [Privacidad por diseño](#7-privacidad-por-diseño)
-8. [Sugerencias para continuar el desarrollo](#8-sugerencias-para-continuar-el-desarrollo)
+6. [Módulo 4 — Dashboard de Métricas](#módulo-4--dashboard-de-métricas)
+   - [6.1 Qué muestra el dashboard](#61-qué-muestra-el-dashboard)
+   - [6.2 Por qué el personal no cuenta en el mapa de calor](#62-por-qué-el-personal-no-cuenta-en-el-mapa-de-calor)
+   - [6.3 Sesión de demostración](#63-sesión-de-demostración)
+7. [Seguridad en la carga de archivos](#7-seguridad-en-la-carga-de-archivos)
+8. [Contratos de datos documentados](#8-contratos-de-datos-documentados)
+9. [Privacidad por diseño](#9-privacidad-por-diseño)
+10. [Sugerencias para continuar el desarrollo](#10-sugerencias-para-continuar-el-desarrollo)
 
 ---
 
 ## 1. Qué se construyó (visión general y estructura)
 
 Una app de escritorio en **Python + PySide6** (Qt) con arquitectura en
-capas para que cada módulo del reto (carga, detección, tracking,
-dashboard) sea una pieza independiente y no un solo archivo gigante.
-El código se reorganizó en subpaquetes por propiedad de equipo
-(ver [`MIGRATION.md`](MIGRATION.md) para el historial de movimientos):
+capas para que cada módulo del reto (carga, detección, dashboard) sea una
+pieza independiente y no un solo archivo gigante. El código se reorganizó
+en subpaquetes por propiedad de equipo (ver [`MIGRATION.md`](MIGRATION.md)
+para el historial de movimientos):
 
 ```
 scapder-vision/
@@ -49,42 +59,56 @@ scapder-vision/
 │   ├── main.py                    # Punto de entrada de la aplicación
 │   ├── ui/
 │   │   ├── main_window.py         # Ventana principal (QTabWidget). Cada módulo
-│   │   │                          # futuro = una pestaña nueva.
-│   │   └── zone_editor_tab.py     # Pestaña 2: dibujo manual de zonas (ROI)
+│   │   │                          # nuevo = una pestaña nueva (hoy: 3).
+│   │   ├── zone_editor_tab.py     # Pestaña 2: dibujo/edición de zonas (ROI)
+│   │   ├── dashboard_tab.py       # Pestaña 3: KPIs, timeline, heatmap, eventos
+│   │   ├── theme.py               # Paleta y stylesheet Qt compartidos
+│   │   └── widgets/
+│   │       ├── header.py          #   Barra superior reutilizable (+ íconos vectoriales)
+│   │       └── footer.py          #   Barra inferior: versión del motor + FPS/CPU en vivo
 │   ├── core/
 │   │   ├── ingestion/             # Team 1 — cámara/IoT e ingesta de frames
-│   │   │   ├── video_loader.py    #   Carga de video + metadatos + validaciones
+│   │   │   ├── video_loader.py    #   Carga de video + metadatos + validaciones de seguridad
 │   │   │   ├── video_cleaner.py   #   Limpieza: frames negros/congelados + reencode
 │   │   │   ├── workers.py         #   QThread para que la UI no se congele (limpieza)
 │   │   │   └── frame_source.py    #   FrameSource: video limpio + mapping / cámara en vivo (stub)
 │   │   ├── detection/             # Team 2 — pipeline de detección
 │   │   │   ├── tracker.py         #   Detección + tracking con ByteTrack integrado (YOLOv11, clase 0 COCO)
 │   │   │   ├── pose.py            #   Estimación de pose corporal (17 keypoints)
-│   │   │   ├── zone.py            #   Zonas + señales geométricas (ZoneManager)
-│   │   │   ├── state_machine.py   #   Máquina de estados IDLE→REACHING→HOLDING
+│   │   │   ├── zone.py            #   Zonas + señales geométricas (ZoneManager, roles product/staff)
+│   │   │   ├── state_machine.py   #   Máquina de estados IDLE→REACHING→HOLDING→taken/returned
+│   │   │   ├── presence.py        #   DwellTracker: tiempo de permanencia por zona de producto
+│   │   │   ├── staff.py           #   StaffZoneTracker: marca "empleado" al entrar a una zona staff
 │   │   │   ├── frame_mapping.py   #   Traducción de timestamps limpio → original
 │   │   │   ├── schemas.py         #   Contratos Pydantic (fuente de verdad)
 │   │   │   ├── event_publisher.py #   Bus de eventos (file / stdout / in-process Qt)
 │   │   │   ├── trajectory.py      #   Captura continua de posición (PositionSample)
 │   │   │   ├── pipeline_worker.py #   QThread para correr el pipeline sin congelar la UI
-│   │   │   └── pipeline.py        #   Orquestador frame a frame (consume FrameSource)
+│   │   │   └── pipeline.py        #   Orquestador frame a frame (consume FrameSource, interrumpible)
 │   │   └── backend/               # Team 3 — almacenamiento y agregación
-│   │       ├── event_store.py     #   SQLite local (eventos + muestras) + suscripción al bus
-│   │       └── heatmap.py         #   Cuadrícula de densidad (grid + blur gaussiano)
+│   │       ├── event_store.py     #   SQLite local (eventos + muestras) + consultas agregadas del dashboard
+│   │       ├── heatmap.py         #   Cuadrícula de densidad (grid + blur gaussiano)
+│   │       ├── evaluation.py      #   Métricas precision/recall/F1 contra ground truth manual
+│   │       └── demo_seed.py       #   Datos de demostración explícitos para el dashboard vacío
 │   └── utils/
-│       └── config.py              # TODOS los parámetros ajustables del proyecto
+│       ├── config.py              # TODOS los parámetros ajustables del proyecto
+│       └── security.py            # Sanitización de nombres, firma de archivo, timeout de lectura
 ├── data/
 │   ├── processed/                 # Videos ya limpios, listos para el pipeline de CV
-│   ├── zones/                     # Polígonos de zona (.json, esquema Zone)
+│   ├── zones/                     # Polígonos de zona (.json, esquema Zone) por video_id
 │   ├── events/                    # Log local de eventos (.jsonl) para debug
+│   ├── scapder_events.db          # SQLite del EventStore (se crea en tiempo de ejecución)
 │   └── logs/                      # Miniaturas y logs locales
 ├── docs/
 │   ├── event_schema.md            # Contrato de datos del bus (auto-generado)
-│   └── zone_schema.md             # Contrato de datos de zonas (auto-generado)
+│   ├── zone_schema.md             # Contrato de datos de zonas (auto-generado)
+│   └── inteligencia-artificial.md # Documentación del pipeline de IA
 ├── scripts/
 │   ├── run_pipeline_debug.py      # Debug visual sin UI (bboxes, keypoints, zonas)
+│   ├── evaluate_pipeline.py       # Evalúa precision/recall/F1 contra un ground truth
+│   ├── benchmark_pipeline.py      # Benchmark de rendimiento del pipeline
 │   └── generate_schema_docs.py    # Genera docs/event_schema.md y docs/zone_schema.md
-├── tests/                         # Tests unitarios (state machine, trayectoria, fuentes, backend)
+├── tests/                         # Tests unitarios (state machine, trayectoria, fuentes, backend...)
 ├── requirements.txt
 ├── run.sh / run.bat
 └── README.md
@@ -93,8 +117,10 @@ scapder-vision/
 ### Flujo funcional de este módulo (Módulo 1)
 
 1. **Cargar video(s)** → `video_loader.load_video()` abre el archivo,
-   valida formato/peso/duración y extrae metadatos (resolución, fps,
-   duración, tamaño) sin recorrer todo el video (rápido).
+   valida formato/peso/duración, **valida que el contenido realmente sea
+   un video** (no solo la extensión, ver [sección 7](#7-seguridad-en-la-carga-de-archivos))
+   y extrae metadatos (resolución, fps, duración, tamaño) sin recorrer
+   todo el video (rápido).
 2. **Vista previa** → `video_loader.extract_thumbnail()` saca un frame
    al 10% de la duración para mostrarlo en el panel derecho.
 3. **Limpiar** → `video_cleaner.clean_video()` recorre frame a frame:
@@ -114,18 +140,21 @@ scapder-vision/
      video limpio no se podría ubicar en el video original de 12 horas.
 4. Todo el paso 3 corre en `app/core/ingestion/workers.py` (un
    `QThread`), para que la ventana no se congele mientras se procesa un
-   video largo.
+   video largo. La barra inferior de la pestaña muestra **FPS y % de CPU
+   en vivo** (`app/ui/widgets/footer.py`, vía `psutil`) mientras corre.
 
 La separación es intencional: `video_loader.py` y `video_cleaner.py`
 **no importan nada de Qt** — se pueden probar por consola, reutilizar en
 un script de línea de comandos, o llamar después desde el módulo de
 detección, sin acoplarlos a la interfaz.
 
-- **Flujo completo**: video original → limpieza (`Módulo 1`) → pipeline
-  de detección (`Módulo 2`) → trayectoria + eventos → SQLite/heatmap
-  (`Módulo 3`).
+- **Flujo completo**: video original → carga segura + limpieza
+  (`Módulo 1`) → pipeline de detección (`Módulo 2`) → trayectoria +
+  eventos → SQLite/heatmap (`Módulo 3`) → Dashboard (`Módulo 4`).
 - **Hilos**: la UI nunca corre trabajo pesado; limpieza y detección
-  corren en `QThread` workers que reportan por señales Qt.
+  corren en `QThread` workers que reportan por señales Qt y pueden
+  **interrumpirse sin esperar a que terminen** (ver botón "Reiniciar" en
+  [5.4](#54-edición-de-zonas-roi-en-la-ui)).
 - **Transporte de eventos**: in-process vía señales Qt (MVP). Los modos
   `file`/`stdout` quedan para debug. Un transporte de red (WebSocket/MQTT)
   es trabajo futuro explícitamente fuera de alcance — ver
@@ -155,11 +184,11 @@ chmod +x run.sh
 Cualquiera de los dos scripts:
 
 1. Crea un entorno virtual (`venv/`) si no existe.
-2. Instala `PySide6`, `opencv-python`, `numpy`, `ultralytics`, `shapely`
-   y `pydantic` desde `requirements.txt`.
+2. Instala `PySide6`, `opencv-python`, `numpy`, `ultralytics`, `shapely`,
+   `pydantic` y `psutil` desde `requirements.txt`.
 3. Lanza la app con `python -m app.main`.
 
-**Despues cada ves que se quiera ejecutar la app**
+**Después, cada vez que se quiera ejecutar la app**
 
 1. `.\venv\Scripts\Activate.ps1` (Windows) o `source venv/bin/activate` (Linux/Mac)
 2. Lanza la app con `python -m app.main`.
@@ -167,16 +196,34 @@ Cualquiera de los dos scripts:
 **Uso dentro de la app:**
 
 - Pestaña _"1. Carga y Limpieza de Video"_:
-  - Botón _"Cargar video(s)"_ → selecciona uno o varios archivos.
+  - Botón _"📁 Haz clic para buscar un archivo"_ → selecciona uno o varios
+    archivos (se validan antes de aceptarse, ver [sección 7](#7-seguridad-en-la-carga-de-archivos)).
   - Click en un video de la lista → ver metadatos + miniatura a la derecha.
-  - Botón _"Limpiar seleccionados"_ o _"Limpiar todos"_ → procesa en
-    segundo plano; el resultado queda en `data/processed/`.
+  - Botones _"Limpiar sel."_ / _"Limpiar todos"_ → procesa en segundo
+    plano; el resultado queda en `data/processed/`.
 - Pestaña _"2. Edición de Zonas (ROI)"_:
-  - Botón _"Cargar video (frame de referencia)"_ → extrae el frame sobre
-    el que se dibujará la zona.
-  - Clics sobre el frame agregan vértices del polígono; _"Deshacer
-    punto"_ / _"Limpiar puntos"_ corrigen el dibujo; escribe un nombre y
-    _"Guardar zona"_ persiste en `data/zones/` con el esquema `Zone`.
+  - Botón _"Cargar video"_ → extrae el frame de referencia sobre el que
+    se dibuja.
+  - **Rol de la zona**: combo con dos opciones — _"Góndola / producto"_
+    (azul) o _"Personal de la tienda"_ (ámbar) — cada click sobre el
+    frame agrega un vértice del color del rol activo.
+  - Clic en una zona ya guardada de la lista **la carga para editarla**:
+    modifica sus puntos y "Guardar zona" sobreescribe el mismo archivo
+    (no crea uno duplicado).
+  - Botón _"Ver detección (debug)"_ → corre el pipeline real sobre el
+    video cargado y anota cajas/keypoints/estado directamente sobre el
+    lienzo.
+  - Botón _"Reiniciar"_ → interrumpe el análisis en curso (sin esperar a
+    que el video termine) y lo vuelve a correr desde el inicio **sobre el
+    mismo video**, sin pedir cargar uno nuevo.
+- Pestaña _"3. Dashboard de Métricas"_ (ver [Módulo 4](#módulo-4--dashboard-de-métricas)):
+  - Selector de sesión (`video_id`) + KPIs, timeline, ranking de zonas,
+    mapa de calor y feed de eventos recientes, todo leído en vivo desde
+    `EventStore` (auto-refresco cada 3s).
+  - Botón de la barra superior → abre el mapa de calor a tamaño completo.
+  - Botón _"Cargar sesión de demostración"_ → siembra datos sintéticos
+    explícitamente marcados como demo, solo si la sesión aún no tiene
+    eventos reales.
 
 ---
 
@@ -185,9 +232,9 @@ Cualquiera de los dos scripts:
 ## 3.1 Qué se construyó (Módulo 1)
 
 Ya descrito en la sección [1](#1-qué-se-construyó-visión-general-y-estructura):
-carga, validación, limpieza (frames negros/congelados), reencode y el
-reporte `.json` con el `frame_mapping` — la pieza que conecta cada frame
-limpio con su momento en el video original.
+carga segura, validación, limpieza (frames negros/congelados), reencode y
+el reporte `.json` con el `frame_mapping` — la pieza que conecta cada
+frame limpio con su momento en el video original.
 
 ## 3.2 Cómo limitar duración y peso de los videos cargados
 
@@ -202,6 +249,14 @@ MAX_VIDEO_DURATION_SEC = 43200       # 12 horas
 
 # Peso máximo permitido en MB. None = sin límite.
 MAX_VIDEO_SIZE_MB = 10000            # 10 GB
+
+# Resolución y frame_count máximos (defensa contra headers manipulados)
+MAX_VIDEO_WIDTH = 7680
+MAX_VIDEO_HEIGHT = 4320
+MAX_VIDEO_FRAME_COUNT = 20_000_000
+
+# Segundos que se espera a OpenCV antes de abortar la carga
+VIDEO_LOAD_TIMEOUT_SEC = 20
 ```
 
 - Para permitir videos más largos: sube `MAX_VIDEO_DURATION_SEC` (está
@@ -210,26 +265,12 @@ MAX_VIDEO_SIZE_MB = 10000            # 10 GB
 - Para quitar el límite por completo: pon `None` en cualquiera de los dos.
 
 La validación real ocurre en `app/core/ingestion/video_loader.py`, dentro
-de la función `load_video()` — no se necesita tocarla a menos que quieras
-cambiar la _lógica_ (por ejemplo, avisar en vez de rechazar, o recortar
-automáticamente el video a los primeros N minutos en lugar de
-rechazarlo). Los dos puntos exactos son:
+de la función `load_video()` — ver [sección 7](#7-seguridad-en-la-carga-de-archivos)
+para el detalle completo de qué valida y en qué orden.
 
-```python
-# Valida el peso del archivo ANTES de abrirlo con OpenCV
-size_mb = path.stat().st_size / (1024 * 1024)
-if MAX_VIDEO_SIZE_MB is not None and size_mb > MAX_VIDEO_SIZE_MB:
-    raise VideoLoadError(...)
-```
-
-```python
-# Valida la duración DESPUÉS de leer los metadatos
-if MAX_VIDEO_DURATION_SEC is not None and duration_sec > MAX_VIDEO_DURATION_SEC:
-    raise VideoLoadError(...)
-```
-
-Si un video excede alguno de los dos límites, la app no lo carga y
-muestra el motivo en el log de la interfaz (no se congela ni truena).
+Si un video excede alguno de los límites (o no pasa alguna de las
+validaciones de seguridad), la app no lo carga y muestra el motivo en el
+log de la interfaz (no se congela ni truena).
 
 ## 3.3 Qué contiene el reporte `.json` de cada limpieza
 
@@ -273,10 +314,10 @@ Cada vez que se limpia un video, junto al video de salida en
 
 Módulo que realiza el análisis computacional en video: detecta personas,
 las sigue entre frames, estima la pose corporal, chequea zonas geométricas
-de interacción con estantes y genera eventos cuando se detectan acciones
-(alcanzar, sostener, tomar producto, devolver producto). Diseñado como
-una capa puramente computacional: sin Qt, sin interfaz — solo cálculos y
-eventos emitidos a través de un bus generalizado.
+de interacción con estantes, mide dwell time, distingue personal de
+clientes y genera eventos cuando se detectan acciones (tomar/devolver
+producto). Diseñado como una capa puramente computacional: sin Qt, sin
+interfaz — solo cálculos y eventos emitidos a través de un bus generalizado.
 
 ## 4.1 Qué se construyó (Módulo 2)
 
@@ -288,13 +329,15 @@ cada componente tiene una responsabilidad clara (todos en
 app/core/detection/
 ├── tracker.py           # Detección + tracking con ByteTrack integrado (YOLOv11, clase 0 COCO)
 ├── pose.py              # Estimación de pose corporal (17 keypoints COCO)
-├── zone.py              # Validación de zonas y cálculo de señales geométricas
-├── state_machine.py     # Máquina de estados: IDLE → REACHING → HOLDING → EVENTO
+├── zone.py              # Validación de zonas y cálculo de señales geométricas (roles product/staff)
+├── state_machine.py     # Máquina de estados: IDLE → REACHING → HOLDING → taken/returned
+├── presence.py          # DwellTracker: tiempo de permanencia por zona de producto
+├── staff.py             # StaffZoneTracker: marcado "sticky" de empleados
 ├── frame_mapping.py     # Traducción de timestamps desde video limpio al original
 ├── schemas.py           # Contratos Pydantic para validación de datos
 ├── event_publisher.py   # Bus de eventos (archivo / stdout / in-process Qt)
 ├── trajectory.py        # Captura continua de posición (PositionSample, Módulo 3)
-├── pipeline_worker.py   # QThread para correr el pipeline sin bloquear la UI
+├── pipeline_worker.py   # QThread para correr el pipeline sin bloquear la UI (interrumpible)
 └── pipeline.py          # Orquestador que corre todo el flujo frame a frame
 ```
 
@@ -304,7 +347,11 @@ app/core/detection/
    un video limpio de `data/processed/` con su `.json` de `frame_mapping`
    (comportamiento original, construido por `VideoFileFrameSource`) o una
    fuente en vivo (stub de Team 1). El pipeline ya no sabe si la entrada
-   es archivo o cámara.
+   es archivo o cámara. `run()` acepta además un `should_stop()` opcional,
+   consultado en cada frame — permite cancelar un análisis en curso sin
+   esperar a que el video termine (lo usa `DetectionPipelineWorker` vía
+   `QThread.isInterruptionRequested`, conectado al botón "Reiniciar" de
+   la pestaña 2).
 
 2. **Tracking de personas** → `tracker.track(frame, frame_index)` detecta
    y sigue personas usando YOLOv11 + ByteTrack. Cada persona recibe un
@@ -334,19 +381,36 @@ app/core/detection/
      máquina resetea a IDLE sin emitir evento — evita falsos positivos.
    - **HOLDING** → si la muñeca permanece dentro durante al menos
      `MIN_FRAMES_HOLDING` (8 frames), y luego sale de la zona, emite un
-     evento con `action="taken"`.
+     evento. La primera interacción de una persona con una zona en la
+     sesión se emite como `action="taken"`; las siguientes **alternan**
+     `"returned"`/`"taken"` (heurístico: no hay detección de producto en
+     sí, así que no se puede saber con certeza si "devolvió" o "volvió a
+     tomar" — alternar es la aproximación razonable sin esa información).
    - Pérdida de tracking: si una persona desaparece durante más de
      `MAX_FRAMES_MISSING_TO_RESET` (10 frames), todos sus estados se
      reinician a IDLE sin emitir eventos.
 
-6. **Traducción de timestamps** → la `FrameSource` devuelve cada frame con
+6. **Dwell time y detección de personal** (portados de la rama `corredor`
+   y adaptados a los nombres de campo de este proyecto):
+   - `DwellTracker` (`presence.py`) mide cuánto tiempo permanece cada
+     persona dentro de cada zona de producto y emite un `DwellRecord`
+     (entrada, salida, duración) al salir.
+   - `StaffZoneTracker` (`staff.py`) marca como `is_employee=True` a
+     cualquier persona que haya entrado alguna vez a una zona de tipo
+     `staff` — el marcado es **sticky**: una vez empleado en la sesión, se
+     queda marcado el resto del video. Ese flag viaja en todos los
+     eventos, dwell records y muestras de posición de esa persona desde
+     ese momento.
+
+7. **Traducción de timestamps** → la `FrameSource` devuelve cada frame con
    su timestamp ya resuelto: `VideoFileFrameSource` usa `frame_mapping.py`
    para convertir el índice del video limpio al segundo absoluto del video
    original (crítico para ubicar eventos en la timeline original); una
    fuente en vivo usaría wall-clock sin mapeo.
 
-7. **Publicación de eventos** → `event_publisher.publish(event)` emite cada
-   evento (`InteractionEvent` y `PositionSample`) según el modo configurado:
+8. **Publicación de eventos** → `event_publisher.publish(event)` emite cada
+   evento (`InteractionEvent`, `PositionSample`, `DwellRecord`) según el
+   modo configurado:
    - `"file"`: guarda JSON local en `data/events/` (respaldo persistente).
    - `"stdout"`: imprime en consola (para debug).
    - `"inprocess"`: señal Qt `Signal(dict)` — transporte del MVP, ver Módulo 3.
@@ -365,8 +429,21 @@ Visualiza en tiempo real:
 - Keypoints de pose superpuestos como **círculos amarillos**,
   únicamente si superan el umbral de confianza (`MIN_KEYPOINT_CONFIDENCE`,
   0.3 por defecto); los que no lo superan simplemente **no se dibujan**.
-- Polígonos de zonas siempre en verde.
+- Polígonos de zonas siempre en verde, con su nombre.
 - Eventos de interacción impresos en consola a medida que ocurren.
+
+La misma visualización está disponible **dentro de la app**, en la
+pestaña 2, con el botón _"Ver detección (debug)"_.
+
+**Evaluar precisión contra un ground truth manual:**
+
+```bash
+python -m scripts.evaluate_pipeline --video data/processed/mi_video_clean.mp4 --ground-truth mi_gt.json
+```
+
+Usa `app/core/backend/evaluation.py` (emparejamiento por `zone_id` +
+`action` dentro de una ventana temporal) para calcular precision, recall
+y F1 — la misma métrica que se ve resumida en el Dashboard.
 
 **Ejecutar tests unitarios:**
 
@@ -379,7 +456,8 @@ Verifica:
 - Detección de atascos en REACHING (resetea a IDLE sin evento).
 - Pérdida de tracking y reset automático.
 - Independencia entre múltiples personas y zonas simultáneamente.
-- Trayectoria continua (`PositionSample`), fuentes de frames y backend.
+- Trayectoria continua (`PositionSample`), fuentes de frames, dwell time,
+  detección de personal, evaluación y backend.
 
 ## 4.4 Qué contiene el `Event Object` (Módulo 2)
 
@@ -388,37 +466,41 @@ Un objeto `InteractionEvent` serializado a JSON se ve así:
 ```json
 {
   "track_id": 42,
-  "zone_id": "shelf_A1",
+  "zone_id": "zone_1",
   "action": "taken",
   "timestamp": 125.4,
-  "event_id": "550e8400-e29b-41d4-a716-446655440000"
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "is_employee": false
 }
 ```
 
 - `track_id` (int): identificador efímero de la persona en esta sesión de
   video (reinicia en 0 para cada video, no es persistente entre sesiones).
-- `zone_id` (str): nombre único de la zona de góndola donde ocurrió la
-  interacción (ej: "shelf_A1", "shelf_B2"). Definido por el usuario en el
-  editor manual de zonas (pestaña 2 de la app).
-- `action` (str, enum): tipo de interacción detectada:
-  - `"taken"`: persona extrajo producto de la zona (salió del estado HOLDING).
-  - Nota: por diseño actual, no se distingue "pick-up" vs "put-back" solo
-    con pose — se necesaría detectar producto o movimiento bidireccional. Por
-    ahora se emite `"taken"` como placeholder.
+- `zone_id` (str): identificador de la zona de góndola donde ocurrió la
+  interacción (ej: `"zone_1"`). Definido por el usuario en el editor
+  manual de zonas (pestaña 2 de la app).
+- `action` (str, enum `"reaching" | "holding" | "taken" | "returned"`):
+  la máquina de estados solo emite `"taken"`/`"returned"` (ver
+  [4.2, paso 5](#42-flujo-funcional-de-este-módulo-módulo-2)); `"reaching"`/`"holding"`
+  quedan reservados para una futura granularidad más fina.
 - `timestamp` (float): segundos desde el inicio del video **original** (antes
   de limpieza), alineado con la duración real de la cámara. Calculado usando
   `frame_mapping` para reproducibilidad exacta.
 - `event_id` (str, UUID): identificador único del evento, generado al
   instante. Útil para auditoría y deduplicación si un evento se publica a
   múltiples destinos.
+- `is_employee` (bool): `True` si `StaffZoneTracker` marcó a este track
+  como empleado en algún momento de la sesión — se usa para separar
+  interacción de cliente vs. personal en el Dashboard y, sobre todo, para
+  **excluir al personal del mapa de calor** (ver [6.2](#62-por-qué-el-personal-no-cuenta-en-el-mapa-de-calor)).
 
 Ejemplo de un archivo de log generado en `data/events/`:
 
 ```json
 [
-  {"track_id": 1, "zone_id": "shelf_A1", "action": "taken", "timestamp": 12.5, "event_id": "..."},
-  {"track_id": 2, "zone_id": "shelf_A1", "action": "taken", "timestamp": 15.3, "event_id": "..."},
-  {"track_id": 3, "zone_id": "shelf_B2", "action": "taken", "timestamp": 18.7, "event_id": "..."}
+  {"track_id": 1, "zone_id": "zone_1", "action": "taken", "timestamp": 12.5, "event_id": "...", "is_employee": false},
+  {"track_id": 2, "zone_id": "zone_1", "action": "taken", "timestamp": 15.3, "event_id": "...", "is_employee": false},
+  {"track_id": 3, "zone_id": "zone_2", "action": "returned", "timestamp": 18.7, "event_id": "...", "is_employee": true}
 ]
 ```
 
@@ -426,10 +508,9 @@ Ejemplo de un archivo de log generado en `data/events/`:
 
 # Módulo 3 — Trayectoria, Transporte In-Process y Backend Local
 
-Este módulo cierra los tres vacíos que el Módulo 2 dejó pendientes:
-captura de posición continua (la base del heatmap — prioridad #1 del
-jurado), desacople de la entrada ("solo video limpio") y un transporte de
-eventos sin red para el dashboard.
+Este módulo captura la posición continua de cada persona (la base del
+heatmap), desacopla la entrada del pipeline ("solo video limpio") y da un
+transporte de eventos sin red hacia el dashboard.
 
 ## 5.1 Captura de trayectoria continua (`PositionSample`)
 
@@ -439,8 +520,9 @@ disparan cuando alguien toma un producto). Para un heatmap de
 
 - `trajectory.py` (`TrajectoryCapture`) registra, por cada frame procesado
   y por cada persona activa: `track_id`, `frame_index`, timestamp original
-  (traducido por la `FrameSource`, sin duplicar `frame_mapping.py`) y la
-  posición del pie — el **bottom-center del bbox** como proxy razonable.
+  (traducido por la `FrameSource`, sin duplicar `frame_mapping.py`), la
+  posición del pie — el **bottom-center del bbox** como proxy razonable —
+  y el flag `is_employee` vigente en ese instante.
 - Se emite como su propio esquema ligero `PositionSample`
   (`schemas.py`), **sin sobrecargar** `InteractionEvent`, por el **mismo**
   `EventPublisher` — el receptor no necesita dos transportes distintos.
@@ -464,19 +546,21 @@ del bucle: solo consume `FrameSource.next_frame()`.
 
 `app/core/detection/event_publisher.py`:
 
-- `EventPublisher.publish(event)` ahora acepta **cualquier modelo Pydantic**
-  (no solo `InteractionEvent`) — un solo bus para eventos y muestras.
-- `InProcessPublisher`: nueva subclase que emite `event_emitted =
-  Signal(dict)` con `event.model_dump()`; cualquier widget se conecta
-  directamente (las conexiones entre hilos se ponen en cola solas).
+- `EventPublisher.publish(event)` acepta **cualquier modelo Pydantic**
+  (no solo `InteractionEvent`) — un solo bus para eventos, muestras y
+  registros de dwell.
+- `InProcessPublisher`: emite `event_emitted = Signal(dict)` con
+  `event.model_dump()`; cualquier widget se conecta directamente (las
+  conexiones entre hilos se ponen en cola solas).
 - `DetectionPipelineWorker` (`pipeline_worker.py`) corre el pipeline en un
   `QThread` (mismo patrón que `workers.py` del Módulo 1), así el stream
-  frecuente de `PositionSample` nunca bloquea la UI.
+  frecuente de `PositionSample` nunca bloquea la UI. Puede interrumpirse
+  en caliente vía `requestInterruption()` sin que quien lo pide tenga que
+  esperar a que el hilo termine.
 - Los modos `file` y `stdout` siguen intactos para debug/logging.
 - **Explícitamente fuera de alcance del MVP**: un transporte de red
   (WebSocket o MQTT) es trabajo futuro razonable si esto corre en varias
-  máquinas — documentado en `docs/event_schema.md`. No se implementó el
-  placeholder de WebSocket que existía.
+  máquinas — documentado en `docs/event_schema.md`.
 
 ## 5.4 Edición de zonas (ROI) en la UI
 
@@ -484,32 +568,138 @@ del bucle: solo consume `FrameSource.next_frame()`.
 
 - Carga un video y usa la utilidad `extract_thumbnail` del Módulo 1 como
   frame de referencia (a resolución completa).
+- **Dos roles de zona**, seleccionables antes de dibujar (combo "Rol de
+  la zona"): `product` (góndola, dwell time de cliente — se dibuja en
+  azul) y `staff` (personal de la tienda, aparte de las de góndola — se
+  dibuja en ámbar). El color de los puntos en construcción cambia según
+  el rol activo, para que sea obvio para cuál de los dos se está dibujando.
 - Cada click agrega un vértice del polígono; los vértices se guardan en
   coordenadas del frame **original** (no del lienzo escalado).
-- Se nombra la zona y se guarda con el **`ZoneManager` existente**
-  (`app/core/detection/zone.py`) → `data/zones/<zone_id>.json`, sin
-  inventar un formato nuevo (ver `docs/zone_schema.md`).
+- **Edición in-place**: seleccionar una zona ya guardada de la lista
+  carga sus puntos en el lienzo para modificarlos; "Guardar zona"
+  sobreescribe el mismo `zone_id.json` en vez de crear uno nuevo.
+- Se guarda con el **`ZoneManager` existente** (`app/core/detection/zone.py`)
+  → `data/zones/<video_id>/<zone_id>.json`, sin inventar un formato nuevo
+  (ver `docs/zone_schema.md`). `ZoneManager.normalize_video_id()` unifica
+  el video crudo y su versión `_clean` bajo el mismo `video_id` — evita
+  crear dos carpetas de zonas distintas para lo que en realidad es la
+  misma sesión.
 
 ## 5.5 Backend local (SQLite + heatmap)
 
-`app/core/backend/` (stubs con TODOs — trabajo activo de Team 3):
+`app/core/backend/`:
 
-- `event_store.py` — `EventStore`: tablas `events` y `position_samples`
-  en SQLite local (`data/scapder_events.db`,
+- `event_store.py` — `EventStore`: tablas `events`, `position_samples` y
+  `dwell_records` en SQLite local (`data/scapder_events.db`,
   `EVENT_STORE_DB_PATH` en `config.py`); `connect_store_to_publisher()`
   suscribe el almacén a la señal de `InProcessPublisher` — persistencia
-  automática sin red.
+  automática sin red. Expone también las consultas agregadas que consume
+  el Dashboard (`get_summary`, `get_zone_breakdown`, `get_timeline`,
+  `get_recent_events`, `get_position_samples`).
 - `heatmap.py` — `build_density_grid()`: convierte `PositionSample`
   acumuladas en una cuadrícula 2D (`numpy` + `cv2.GaussianBlur`, no
-  conteos crudos) lista para el dashboard (Team 4).
+  conteos crudos) lista para pintar.
+- `evaluation.py` — precision/recall/F1 de los eventos predichos contra
+  un ground truth manual (usado por `scripts/evaluate_pipeline.py` y
+  resumido en el Dashboard).
+- `demo_seed.py` — genera una sesión sintética (eventos + dwell +
+  trayectorias) **estructuralmente idéntica** a la real, solo para que el
+  Dashboard sea demostrable antes de correr el pipeline completo; nunca
+  se activa automáticamente (botón explícito, marcado como demo en la UI).
 
 ---
 
-## 6. Contratos de datos documentados
+# Módulo 4 — Dashboard de Métricas
+
+`app/ui/dashboard_tab.py` (pestaña "3. Dashboard de Métricas"). A
+diferencia del resto de la UI, este tab lee directamente del `EventStore`
+real (SQLite) — no hay datos mockeados en el código del widget.
+
+## 6.1 Qué muestra el dashboard
+
+- **KPIs**: interacciones totales, tasa de toma neta (`taken` vs.
+  `returned`), dwell promedio, % de interacción de personal y zonas
+  activas — cada uno con una mini serie de tendencia.
+- **Timeline**: `taken`/`returned` agrupados en buckets de 30s
+  (`EventStore.get_timeline`).
+- **Desempeño por zona**: barras `taken`/`returned` + dwell promedio por
+  zona de producto, con nombre real (leído de `ZoneManager`).
+- **Mapa de calor de circulación de clientes**: construido con
+  `build_density_grid` a partir de `PositionSample`, dibujado sobre el
+  contorno real de cada zona (sólido = producto, punteado = personal). Se
+  relee del disco en cada refresco (~3s), así una edición de zona en la
+  pestaña 2 se refleja sin pasos extra. Un botón en la barra superior lo
+  abre a tamaño completo.
+- **Feed de eventos recientes**: últimos 15 eventos, con track, zona,
+  acción y timestamp.
+- **Panel de precisión del pipeline**: precision/recall/F1 (ver `evaluation.py`).
+
+## 6.2 Por qué el personal no cuenta en el mapa de calor
+
+`StaffZoneTracker` marca a un track como `is_employee=True` de forma
+**sticky**: una vez que alguien pisa la zona de personal, todas sus
+muestras de posición durante el resto de la sesión llevan ese flag —
+incluidas las que genera reponiendo una góndola, es decir, exactamente
+donde también camina un cliente.
+
+Si esas muestras se contaran igual que las de un cliente, un empleado
+parado horas en el mismo punto (caja, mostrador, reponiendo un estante)
+generaría una mancha de calor artificial que no representa interés real
+de cliente — el dato quedaría sesgado. Por eso:
+
+- `EventStore.get_position_samples(exclude_employees=True)` — **default**
+  — descarta esas muestras antes de construir la cuadrícula de densidad.
+- La zona de personal se sigue dibujando sobre el heatmap (contorno
+  punteado ámbar), pero solo como referencia geométrica de dónde está esa
+  zona — no aporta densidad.
+- Se puede pedir explícitamente `exclude_employees=False` (por ejemplo,
+  para un análisis interno de circulación de personal) sin tocar el resto
+  del pipeline.
+
+## 6.3 Sesión de demostración
+
+Mientras las pestañas de detección en vivo terminan de integrarse a la
+UI, el botón _"Cargar sesión de demostración"_ siembra (`demo_seed.py`)
+eventos, dwell records y trayectorias sintéticas — usando las zonas
+**reales** ya guardadas para esa sesión — solo si `EventStore` todavía no
+tiene eventos reales. Nunca se activa solo ni reemplaza datos reales: es
+explícito, está marcado en la interfaz, y deja de tener efecto en cuanto
+el pipeline publica su primer evento real.
+
+---
+
+## 7. Seguridad en la carga de archivos
+
+La app acepta videos de una fuente que, por definición, no es confiable
+(un archivo que sube o selecciona la persona usuaria). `app/utils/security.py`
+y `app/core/ingestion/video_loader.py` cierran los vectores más directos
+de abuso — no reemplazan un sandbox real, pero evitan que un archivo
+malicioso o corrupto crashee o cuelgue la app:
+
+| Riesgo | Mitigación |
+|---|---|
+| Un script/ejecutable renombrado a `.mp4` (la extensión no prueba nada) | `has_valid_video_signature()`: valida los primeros bytes del archivo contra la firma real del contenedor (`ftyp` para mp4/mov, `RIFF...AVI ` para avi, EBML para mkv, GUID ASF para wmv) **antes** de pasarlo a OpenCV |
+| Contenedor corrupto o deliberadamente malformado que cuelga la lectura | `run_with_timeout()`: corre la apertura + primer frame (y la extracción de miniatura) en un hilo aparte con un límite de tiempo (`VIDEO_LOAD_TIMEOUT_SEC`, 20s por defecto) — la UI nunca se congela esperando indefinidamente |
+| Header manipulado reportando una resolución o cantidad de frames absurda (posible intento de agotar memoria más adelante) | `MAX_VIDEO_WIDTH`/`MAX_VIDEO_HEIGHT` (8K) y `MAX_VIDEO_FRAME_COUNT` en `config.py`: se rechaza el archivo si el header reporta valores fuera de todo rango razonable |
+| Archivo vacío, carpeta, symlink roto o dispositivo en vez de un archivo real | `path.is_file()` + chequeo explícito de tamaño `> 0` antes de intentar abrir nada |
+| Video/carpeta que pesa demasiado o dura demasiado (agotamiento de disco/tiempo de proceso) | `MAX_VIDEO_SIZE_MB` / `MAX_VIDEO_DURATION_SEC` (ya existían, documentados en [3.2](#32-cómo-limitar-duración-y-peso-de-los-videos-cargados)) |
+| Un nombre de archivo que termina usado como nombre de carpeta (`data/zones/<video_id>/`) con caracteres inesperados | `sanitize_filename_component()`: colapsa separadores de directorio, caracteres reservados de Windows (`* ? " < > \| :`) y de control a `_`, y neutraliza secuencias `..` — sin destruir acentos/ñ de nombres reales, solo bloquea lo peligroso |
+
+`load_video()` aplica las validaciones **de la más barata a la más
+costosa**: existencia → tipo de archivo → extensión → tamaño → firma de
+contenedor, y solo al final invoca a OpenCV (con timeout). Un archivo
+obviamente inválido nunca llega a la parte que podría colgarse.
+
+Estos límites son valores de `app/utils/config.py`, igual que los del
+Módulo 1 — cambiarlos no requiere tocar ningún otro archivo.
+
+---
+
+## 8. Contratos de datos documentados
 
 | Contrato | Archivo | Generado por |
 |----------|---------|--------------|
-| Eventos del bus (`InteractionEvent`, `PositionSample`) | [`docs/event_schema.md`](docs/event_schema.md) | `scripts/generate_schema_docs.py` |
+| Eventos del bus (`InteractionEvent`, `PositionSample`, `DwellRecord`) | [`docs/event_schema.md`](docs/event_schema.md) | `scripts/generate_schema_docs.py` |
 | Zonas (`Zone`, `ZoneSignal`, formato de archivo) | [`docs/zone_schema.md`](docs/zone_schema.md) | `scripts/generate_schema_docs.py` |
 
 Los `.md` se **generan desde el código real** (los modelos Pydantic de
@@ -519,7 +709,7 @@ si el esquema cambia, se regeneran con
 
 ---
 
-## 7. Privacidad por diseño
+## 9. Privacidad por diseño
 
 ### Módulo 1
 
@@ -531,7 +721,7 @@ si el esquema cambia, se regeneran con
   reconocibles (por ahora son solo para revisión visual del prototipo).
 - Esta capa base no envía nada a internet: todo el procesamiento es local.
 
-### Módulo 2 y 3
+### Módulos 2, 3 y 4
 
 - **Sin reconocimiento facial**: el sistema solo calcula bounding boxes de
   cuerpo completo y coordenadas numéricas de articulaciones (muñeca, codo,
@@ -545,13 +735,17 @@ si el esquema cambia, se regeneran con
   dinámicamente durante la ejecución y se descartan al cerrar el video. No
   persisten entre sesiones ni se pueden usar para re-identificar a la misma
   persona en otro video (no hay base de datos de identidades).
-- **Timestamps traceable al original**: los eventos y las muestras de
+- **Personal vs. cliente sin identidad**: `is_employee` es un flag
+  booleano por track efímero (basado en si pisó una zona de personal), no
+  una identidad de empleado — no hay padrón de empleados ni registro de
+  quién es quién.
+- **Timestamps trazables al original**: los eventos y las muestras de
   posición se pueden ubicar exactamente en el video original, útil para
   auditoría y revisión manual en caso de disputa o error del sistema.
 
 ---
 
-## 8. Sugerencias para continuar el desarrollo
+## 10. Sugerencias para continuar el desarrollo
 
 El proyecto está pensado para que cada punto siguiente sea una pestaña
 nueva en `app/ui/main_window.py` y un módulo nuevo en `app/core/`, sin
@@ -559,25 +753,24 @@ reescribir lo ya construido.
 
 ### Corto plazo (siguiente iteración)
 
-- **Dashboard de heatmap (Team 4 + Team 3)**: los datos ya fluyen
-  (`PositionSample` → `EventStore`); falta la pestaña que lea el SQLite,
-  genere el grid con `heatmap.build_density_grid()` y lo pinte
-  (Qt/matplotlib embebido). Es la pieza más visible para el jurado.
+- **Conectar el pipeline en vivo al Dashboard**: hoy la pestaña 3 lee
+  `EventStore` correctamente y el pipeline ya publica ahí en producción,
+  pero todavía no hay una pestaña de "Detección en vivo" que dispare una
+  corrida completa (no solo el debug de la pestaña 2) desde la UI
+  principal — es la pieza que cierra el flujo de punta a punta sin pasar
+  por el botón de debug.
 - **Implementar la cámara en vivo (Team 1)**: reemplazar el stub
   `LiveFrameSource` por `cv2.VideoCapture` de webcam/RTSP con timestamps
   wall-clock — el resto del pipeline no cambia.
-- **Distinción pick-up vs put-back**: actualmente todos los eventos se
-  emiten como `action="taken"`. Para distinguir si la persona **extrajo** o
-  **devolvió** el producto, se podría:
+- **Distinción real pick-up vs put-back**: hoy la máquina de estados
+  **alterna** `taken`/`returned` por track+zona (heurístico, sin
+  detección de producto). Para distinguirlo con certeza se podría:
   - Detectar el movimiento de la mano (ascendente = tomar, descendente = devolver).
   - Usar una red clasificadora pequeña entrenada con anotaciones locales.
   - Combinar con información de carrito / zona de compra cercana.
 
 ### Mediano plazo
 
-- **Dwell time por zona**: con las muestras de trayectoria ya guardadas,
-  calcular cuánto tiempo pasa cada persona dentro de cada polígono de zona
-  (los datos están listos; falta la agregación por zona).
 - **Mejora de robustez en pose bajo oclusión**: si el estante ocluye
   parcialmente al brazo, puede que los keypoints fallen. Se podría:
   - Usar modelos de pose más robustos (YOLOv11-pose-large, MediaPipe).
@@ -588,23 +781,22 @@ reescribir lo ya construido.
   necesaría revisar la lógica de estado.
 - **Persistencia de resultados consolidada**: el reporte de limpieza de cada
   video (incluido el mapeo frame-a-frame contra el original) ya se guarda
-  automáticamente como `.json` junto al video limpio en `data/processed/`.
-  Lo que sigue pendiente es un **registro histórico consolidado** de todas
-  las corridas (por ejemplo en SQLite): qué videos se procesaron, cuándo y
-  con qué configuración de `config.py`, para poder auditar y comparar
-  corridas entre sí.
+  automáticamente como `.json` junto al video limpio en `data/processed/`,
+  y los eventos ya viven en SQLite. Lo que sigue pendiente es un
+  **registro histórico consolidado** por sesión (qué video, cuándo, con
+  qué configuración de `config.py`), para auditar y comparar corridas.
 - **"ROI Auto-Suggest" automático**: en lugar de dibujar cada zona a mano,
   se podría entrenar un modelo ligero para detectar estantes
   automáticamente en un frame de referencia y sugerir los polígonos. La
-  herramienta manual ya existe (pestaña 2); esto sería una mejora sobre
-  ella.
+  herramienta manual ya existe (pestaña 2, con edición in-place); esto
+  sería una mejora sobre ella.
+- **Filtro de personal configurable en la UI**: el Dashboard ya soporta
+  `exclude_employees=False` a nivel de `EventStore`; falta exponer un
+  toggle visual para alternarlo sin editar código, útil para un análisis
+  interno de circulación de personal.
 
 ### Largo plazo
 
-- **Dashboard de métricas accionables**: zonas frías/calientes, tasa de
-  interacción, tasa de rechazo (put-back/pick-up), correlacionadas con
-  el layout — la pieza que convierte los datos crudos en recomendaciones
-  de space management.
 - **Análisis de patrones**: con un histórico de eventos, detectar patrones
   anómalos (ej: misma persona, mismo producto, en segundos — posible hurto o
   problema de reabastecimiento).
@@ -623,12 +815,16 @@ reescribir lo ya construido.
 ### Recomendación de orden de implementación
 
 1. Detección + tracking (sin esto no hay nada más que construir) — **hecho**.
-2. Zonificación manual (necesaria para dwell time y heatmaps) — **hecho**
-   (pestaña 2).
-3. Captura de trayectoria continua para heatmaps — **hecho** (Módulo 3).
-4. Dashboard de heatmap + dwell time (primer valor demostrable con datos
-   reales) — **pendiente** (datos listos, falta la pestaña).
-5. Eventos de interacción pick-up vs put-back (distinción fina).
-6. Dashboard consolidado de métricas.
-7. Motor de recomendación basado en reglas.
-8. Optimización edge (OpenVINO) como paso final de "productización".
+2. Zonificación manual, con roles producto/personal y edición in-place —
+   **hecho** (pestaña 2).
+3. Captura de trayectoria continua, dwell time y detección de personal —
+   **hecho** (Módulo 2/3).
+4. Dashboard de heatmap + KPIs + eventos (primer valor demostrable con
+   datos reales) — **hecho** (Módulo 4).
+5. Seguridad en la carga de archivos — **hecho** (sección 7).
+6. Eventos de interacción pick-up vs put-back con certeza (más allá del
+   heurístico de alternancia actual).
+7. Conectar una corrida completa del pipeline (no solo debug) desde la UI
+   principal, y cámara en vivo.
+8. Motor de recomendación basado en reglas.
+9. Optimización edge (OpenVINO) como paso final de "productización".

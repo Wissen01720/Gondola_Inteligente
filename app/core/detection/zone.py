@@ -9,6 +9,7 @@ from shapely.geometry import Point, Polygon
 
 from app.core.detection.schemas import Zone, ZoneSignal, PoseResult, Keypoint
 from app.utils.config import ZONES_STORAGE_PATH, ARM_EXTENSION_MIN_RATIO, MIN_KEYPOINT_CONFIDENCE
+from app.utils.security import sanitize_filename_component
 
 # Cache de objetos Polygon de Shapely, para no reconstruirlos en cada llamada:
 # se invoca por cada persona, por cada zona, en cada frame del video, y
@@ -29,7 +30,12 @@ def normalize_video_id(video_id: str) -> str:
     (`<nombre>` además de `<nombre>_clean`) para lo que en realidad es la
     misma sesión — el bug reportado de "carpetas duplicadas" en
     `data/zones/`.
+
+    También sanitiza `video_id` (ver `sanitize_filename_component`): este
+    valor se usa tal cual como nombre de carpeta en disco, y en último
+    término viene del nombre de un archivo subido por el usuario.
     """
+    video_id = sanitize_filename_component(video_id, fallback="video")
     return video_id if video_id.endswith("_clean") else f"{video_id}_clean"
 
 
@@ -62,8 +68,9 @@ class ZoneManager:
         de puntos actualiza el mismo archivo en vez de crear uno nuevo).
         """
         video_id = normalize_video_id(zone.video_id)
-        if video_id != zone.video_id:
-            zone = zone.model_copy(update={"video_id": video_id})
+        zone_id = sanitize_filename_component(zone.zone_id, fallback="zone")
+        if video_id != zone.video_id or zone_id != zone.zone_id:
+            zone = zone.model_copy(update={"video_id": video_id, "zone_id": zone_id})
         video_dir = self.storage_path / video_id
         video_dir.mkdir(parents=True, exist_ok=True)
         file_path = video_dir / f"{zone.zone_id}.json"
@@ -94,6 +101,7 @@ class ZoneManager:
         existía (no lanza excepción en ese caso: para la UI, "ya no
         existe" y "se acaba de borrar" tienen el mismo resultado neto).
         """
+        zone_id = sanitize_filename_component(zone_id, fallback="zone")
         file_path = self.storage_path / normalize_video_id(video_id) / f"{zone_id}.json"
         if not file_path.exists():
             return False

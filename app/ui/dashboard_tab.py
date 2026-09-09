@@ -272,6 +272,11 @@ class HeatmapWidget(QWidget):
     "puntos de pie" que publica el pipeline por cada frame y cada persona
     trackeada. Sobre esa cuadrícula se dibuja el contorno de cada zona
     (sólido = producto, punteado = personal) en su posición real.
+
+    El widget recibe ya filtradas las muestras de personal (ver
+    `EventStore.get_position_samples(exclude_employees=True)`, el default):
+    un empleado no debe tratarse como densidad de cliente, solo como el
+    contorno de referencia de su zona.
     """
 
     GRID_SIZE = (64, 36)
@@ -474,8 +479,8 @@ class DashboardTab(QWidget):
         grid.addWidget(recent_card, 2, 0)
 
         heatmap_card = Card(
-            "Mapa de calor de circulación",
-            "Punteado = ROI de personal (no son personas detectadas) · botón de la barra superior para verlo en grande",
+            "Mapa de calor de circulación de clientes",
+            "Personal excluido del cálculo · botón de la barra superior para verlo en grande",
         )
         self.heatmap = HeatmapWidget()
         self.heatmap_empty = EmptyState("Sin muestras de posición aún (PositionSample vacío).")
@@ -551,8 +556,10 @@ class DashboardTab(QWidget):
 
         caption = QLabel(
             "Contorno sólido = zona de producto (ROI de góndola). Contorno punteado = "
-            "zona de personal — un área de rastreo definida en la pestaña 2 para excluir "
-            "empleados de las métricas de cliente, no una persona detectada por el sistema."
+            "zona de personal — un área de rastreo definida en la pestaña 2 para identificar "
+            "empleados, no una persona detectada por el sistema. Sus muestras de posición se "
+            "excluyen del cálculo de densidad: un empleado parado horas en el mismo punto no "
+            "debería aparecer como una mancha de interés de cliente."
         )
         caption.setWordWrap(True)
         caption.setObjectName("mutedText")

@@ -26,6 +26,26 @@ MAX_VIDEO_DURATION_SEC = 43200        # 12 horas
 # Peso máximo permitido en MB. None = sin límite.
 MAX_VIDEO_SIZE_MB = 10000             # 10 GB
 
+# ---- Seguridad de carga (archivos de fuentes no confiables) ----
+# Segundos máximos que se espera a que OpenCV abra el video y lea el
+# primer frame antes de abortar la carga. Un contenedor corrupto o
+# deliberadamente malformado puede colgar la lectura indefinidamente;
+# esto evita que la UI se congele para siempre esperándola.
+VIDEO_LOAD_TIMEOUT_SEC = 20
+
+# Resolución máxima aceptada (ancho, alto). Un header manipulado que
+# reporte una resolución absurda podría disparar asignaciones de memoria
+# enormes más adelante (miniatura, tracking, pose) — 8K de margen es más
+# que suficiente para cualquier cámara de vigilancia real.
+MAX_VIDEO_WIDTH = 7680
+MAX_VIDEO_HEIGHT = 4320
+
+# Tope de sanidad para frame_count reportado por el contenedor — no es una
+# duración esperada (para eso está MAX_VIDEO_DURATION_SEC), sino una
+# defensa contra un valor de header corrupto/manipulado fuera de todo
+# rango razonable.
+MAX_VIDEO_FRAME_COUNT = 20_000_000
+
 # ---- Parámetros de limpieza de video ----
 # FPS objetivo al reencodar (None = mantener el original)
 DEFAULT_TARGET_FPS = None

@@ -225,19 +225,29 @@ class EventStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_position_samples(self, limit: int = 6000) -> list[PositionSample]:
+    def get_position_samples(self, limit: int = 6000, exclude_employees: bool = True) -> list[PositionSample]:
         """
         Muestras de posición (pie de cada persona por frame), reconstruidas
         como `PositionSample` — es el insumo de `build_density_grid`
         (`app/core/backend/heatmap.py`) para el mapa de calor del dashboard.
 
+        `exclude_employees=True` (default) descarta las muestras marcadas
+        `is_employee` — el heatmap busca mostrar circulación e interés de
+        **clientes**; un empleado parado horas en el mismo punto (caja,
+        mostrador, reponiendo una góndola) generaría ahí una mancha de
+        calor artificial que no refleja tráfico de cliente. La zona de
+        personal (ROI de `StaffZoneTracker`) ya se dibuja aparte sobre el
+        heatmap para dar contexto — no debería, además, sumar densidad
+        como si fuera una zona más de circulación.
+
         `limit` acota cuántas muestras recientes se traen: una sesión larga
         puede acumular decenas de miles de filas y el heatmap no necesita
         más que unos miles de puntos para verse denso.
         """
+        where = "WHERE is_employee = 0" if exclude_employees else ""
         rows = self._conn.execute(
-            "SELECT track_id, frame_index, timestamp, foot_x, foot_y, camera_id, is_employee "
-            "FROM position_samples ORDER BY timestamp DESC LIMIT ?",
+            f"SELECT track_id, frame_index, timestamp, foot_x, foot_y, camera_id, is_employee "
+            f"FROM position_samples {where} ORDER BY timestamp DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [
