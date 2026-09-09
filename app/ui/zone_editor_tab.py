@@ -13,7 +13,7 @@ import numpy as np
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -287,10 +287,10 @@ class ZoneEditorTab(QWidget):
         self.btn_debug.clicked.connect(self.on_run_debug)
         self.btn_reset = QPushButton("Reiniciar")
         self.btn_reset.setToolTip(
-            "Detiene el debug en curso (si hay uno, sin esperar a que termine "
-            "el video), descarta el video y la zona en construcción de esta "
-            "pantalla (las zonas ya guardadas no se tocan) y abre el selector "
-            "para analizar un video distinto, sin cerrar la aplicación."
+            "Detiene el análisis en curso (si hay uno, sin esperar a que "
+            "termine el video) y lo vuelve a correr desde el inicio sobre "
+            "el mismo video ya cargado — no hace falta cargarlo de nuevo. "
+            "Para analizar un video distinto, usa 'Cargar video'."
         )
         self.btn_reset.clicked.connect(self._on_reset_session)
 
@@ -484,34 +484,39 @@ class ZoneEditorTab(QWidget):
 
     def _on_reset_session(self):
         """
-        Detiene cualquier debug en curso (sin esperar a que el video
-        termine), descarta el video/zona en construcción de esta pantalla,
-        y abre el selector de archivo para cargar uno nuevo — evita tener
-        que cerrar y reabrir la app para analizar un video distinto.
-
-        No borra ninguna zona ya guardada en disco (esas viven por
-        video_id, vía ZoneManager): solo resetea el estado en memoria de
-        este tab.
+        Reinicia el ANÁLISIS, no la sesión: detiene el debug en curso (si
+        lo hay, sin esperar a que el video termine) y lo vuelve a correr
+        desde el principio sobre el MISMO video que ya está cargado — no
+        pide cargar otro ni descarta el video actual. Para analizar un
+        video distinto se sigue usando "Cargar video", que ya reemplaza
+        la sesión completa sin tener que cerrar y reabrir la app.
         """
+        if self._current_video_path is None:
+            QMessageBox.information(self, "Sin video", "Carga un video con 'Cargar video' antes de reiniciar.")
+            return
+
+        was_running = self._debug_worker is not None and self._debug_worker.isRunning()
         self._stop_debug_worker()
 
-        self.canvas._image = None  # vuelve al estado "sin video" (placeholder del lienzo)
-        self.canvas.points = []
-        self.canvas.existing_zone = None
-        self.canvas.update()
+        # `on_run_debug()` no arranca si el lienzo tiene un polígono suelto
+        # sin guardar — se descarta acá para que "Reiniciar" siempre pueda
+        # relanzar el análisis sin un diálogo de advertencia de por medio.
+        self.canvas.clear_points()
         self.name_input.clear()
         self._editing_zone_id = None
-        self._current_video_id = None
-        self._current_video_path = None
-        self._current_video_fps = 30.0
-        self._debug_reference_image = None
-        self._debug_zones = []
+        if self._debug_reference_image is not None:
+            # Vuelve del frame anotado en vivo al frame de referencia
+            # estático (por si el debug interrumpido dejó el lienzo con
+            # cajas/keypoints dibujados encima).
+            self.canvas.set_frame(self._debug_reference_image)
         self.footer.reset_fps()
-        self.header.set_source_name("VISION_ZONE_05")
         self._refresh_zone_list()
-        self._log(" Sesión reiniciada — selecciona el nuevo video a analizar.")
 
-        self._on_load_video()
+        self._log(
+            " Análisis interrumpido — reiniciando sobre el mismo video..."
+            if was_running else " Reiniciando análisis sobre el mismo video..."
+        )
+        self.on_run_debug()
 
     # ------------------------------------------------- debug de detección --
     def on_run_debug(self):
@@ -831,12 +836,14 @@ class ZoneEditorTab(QWidget):
 
     def _on_delete_zone(self):
         items = self.zone_list.selectedItems()
-        if not items:
-            QMessageBox.information(self, "Sin selección", "Selecciona una zona guardada de la lista para eliminarla.")
-            return
-        zone_id = items[0].data(Qt.UserRole)
+        zone_id = items[0].data(Qt.UserRole) if items else None
         if zone_id is None:
-            QMessageBox.information(self, "Sin selección", "Esa fila es el polígono en construcción, no una zona guardada.")
+            # La fila de "edición en vivo" siempre tiene zone_id=None en el
+            # QListWidgetItem (ver _refresh_zone_list) — si se está editando
+            # una zona guardada, esta es la que realmente se quiere borrar.
+            zone_id = self._editing_zone_id
+        if zone_id is None:
+            QMessageBox.information(self, "Sin selección", "Selecciona una zona guardada de la lista para eliminarla.")
             return
         zone = self._zones.get(zone_id)
         name = zone.name if zone else zone_id
@@ -884,7 +891,15 @@ class ZoneEditorTab(QWidget):
         if type_index >= 0:
             self.type_combo.setCurrentIndex(type_index)  # dispara _on_type_changed (color/banner)
         self.canvas.update()
-        self._refresh_zone_list()
+        # OJO: NO reconstruir self.zone_list (clear() + addItem()) acá
+        # mismo — este método corre dentro de la propia señal
+        # `itemSelectionChanged` del widget, y reentrar sobre él desde su
+        # propio handler (borrar/re-agregar items mientras Qt todavía está
+        # despachando esa señal) es el crash nativo sin traceback que se
+        # veía al eliminar una zona justo después de seleccionarla.
+        # `singleShot(0, ...)` difiere la reconstrucción al siguiente tick
+        # del event loop, ya con la señal actual completamente despachada.
+        QTimer.singleShot(0, self._refresh_zone_list)
         self._log(f" Editando zona {zone_id} — modifica los puntos y presiona 'Guardar zona'.")
 
     def _log(self, message: str):
