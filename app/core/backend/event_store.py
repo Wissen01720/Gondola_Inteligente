@@ -127,8 +127,107 @@ class EventStore:
     def count_dwell_records(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM dwell_records").fetchone()[0]
 
-    # TODO(Team 3): query_position_samples(rango_tiempo, zone/camera filter),
-    # query_events(zone_id, action), query_dwell_records(zone_id), stats por sesión.
+    # ------------------------------------------------- consultas agregadas --
+    # Usadas por el dashboard (app/ui/dashboard_tab.py). Todas devuelven
+    # tipos nativos de Python (dict/list), listos para pintar en la UI sin
+    # que el widget tenga que saber nada de SQL.
+
+    def get_summary(self) -> dict:
+        """Totales generales de la sesión: base de los KPIs del dashboard."""
+        taken = self._conn.execute(
+            "SELECT COUNT(*) FROM events WHERE action = 'taken'"
+        ).fetchone()[0]
+        returned = self._conn.execute(
+            "SELECT COUNT(*) FROM events WHERE action = 'returned'"
+        ).fetchone()[0]
+        total_events = self.count_events()
+        employee_events = self._conn.execute(
+            "SELECT COUNT(*) FROM events WHERE is_employee = 1"
+        ).fetchone()[0]
+        avg_dwell = self._conn.execute(
+            "SELECT AVG(duration_sec) FROM dwell_records"
+        ).fetchone()[0]
+        active_zones = self._conn.execute(
+            "SELECT COUNT(DISTINCT zone_id) FROM events"
+        ).fetchone()[0]
+
+        return {
+            "total_events": total_events,
+            "taken": taken,
+            "returned": returned,
+            "take_rate": round(taken / total_events, 4) if total_events else 0.0,
+            "avg_dwell_sec": round(avg_dwell, 2) if avg_dwell is not None else 0.0,
+            "employee_events": employee_events,
+            "employee_share": round(employee_events / total_events, 4) if total_events else 0.0,
+            "active_zones": active_zones,
+        }
+
+    def get_zone_breakdown(self) -> list[dict]:
+        """Conteo de `taken`/`returned` y dwell promedio, agrupado por zona."""
+        rows = self._conn.execute(
+            """
+            SELECT
+                zone_id,
+                SUM(CASE WHEN action = 'taken' THEN 1 ELSE 0 END)    AS taken,
+                SUM(CASE WHEN action = 'returned' THEN 1 ELSE 0 END) AS returned
+            FROM events
+            GROUP BY zone_id
+            """
+        ).fetchall()
+        dwell_by_zone = {
+            r["zone_id"]: r["avg_dwell"]
+            for r in self._conn.execute(
+                "SELECT zone_id, AVG(duration_sec) AS avg_dwell FROM dwell_records GROUP BY zone_id"
+            ).fetchall()
+        }
+        return [
+            {
+                "zone_id": r["zone_id"],
+                "taken": r["taken"],
+                "returned": r["returned"],
+                "avg_dwell_sec": round(dwell_by_zone.get(r["zone_id"], 0.0) or 0.0, 2),
+            }
+            for r in rows
+        ]
+
+    def get_timeline(self, bucket_sec: float = 30.0) -> list[dict]:
+        """
+        Serie temporal de `taken`/`returned`, agrupada en buckets de
+        `bucket_sec` segundos desde el primer evento de la sesión.
+        """
+        rows = self._conn.execute("SELECT action, timestamp FROM events ORDER BY timestamp").fetchall()
+        if not rows:
+            return []
+
+        t0 = rows[0]["timestamp"]
+        buckets: dict[int, dict] = {}
+        for r in rows:
+            idx = int((r["timestamp"] - t0) // bucket_sec)
+            bucket = buckets.setdefault(idx, {"taken": 0, "returned": 0})
+            if r["action"] in ("taken", "returned"):
+                bucket[r["action"]] += 1
+
+        return [
+            {
+                "bucket_start_sec": t0 + idx * bucket_sec,
+                "taken": buckets[idx]["taken"],
+                "returned": buckets[idx]["returned"],
+            }
+            for idx in range(max(buckets) + 1)
+        ]
+
+    def get_recent_events(self, limit: int = 15) -> list[dict]:
+        """Últimos eventos registrados, más recientes primero (para el feed en vivo)."""
+        rows = self._conn.execute(
+            "SELECT event_id, track_id, zone_id, action, timestamp, is_employee "
+            "FROM events ORDER BY timestamp DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # TODO(Team 3): query_position_samples(rango_tiempo, zone/camera filter)
+    # para alimentar el heatmap con datos reales en vez de la cuadrícula
+    # agregada; stats por sesión/video_id cuando `events` gane esa columna.
 
     def close(self) -> None:
         self._conn.close()

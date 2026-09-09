@@ -33,6 +33,7 @@ from app.core.ingestion.workers import VideoCleaningWorker
 from app.ui.dialogs.cut_video_dialog import CutVideoDialog
 from app.ui.widgets.footer import FooterBar
 from app.ui.widgets.header import HeaderBar
+from app.ui.dashboard_tab import DashboardTab
 from app.ui.zone_editor_tab import ZoneEditorTab
 from app.utils import config
 
@@ -401,6 +402,6 @@ class MainWindow(QMainWindow):
         # Futuras pestañas (ya con el espacio reservado en la arquitectura):
         # tabs.addTab(DetectionTab(), "3. Detección y Tracking")
         # tabs.addTab(InteractionTab(), "4. Eventos de Interacción")
-        # tabs.addTab(DashboardTab(), "5. Dashboard de Métricas")
+        tabs.addTab(DashboardTab(), "5. Dashboard de Métricas")
 
         self.setCentralWidget(tabs)
