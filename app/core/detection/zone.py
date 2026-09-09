@@ -63,6 +63,20 @@ class ZoneManager:
                 pass
         return zones
 
+    def delete_zone(self, video_id: str, zone_id: str) -> bool:
+        """
+        Elimina el archivo JSON de una zona guardada para un video/cámara.
+
+        Devuelve True si el archivo existía y se borró, False si no
+        existía (no lanza excepción en ese caso: para la UI, "ya no
+        existe" y "se acaba de borrar" tienen el mismo resultado neto).
+        """
+        file_path = self.storage_path / video_id / f"{zone_id}.json"
+        if not file_path.exists():
+            return False
+        file_path.unlink()
+        return True
+
 
 def _euclidean_distance(kp1: Keypoint, kp2: Keypoint) -> float:
     """Calcula la distancia euclidiana entre dos keypoints."""

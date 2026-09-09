@@ -8,6 +8,8 @@ panel era información repetida sin ninguna acción real). El panel
 lienzo de dibujo ahora ocupa el resto del ancho disponible — antes
 competía por espacio con tres columnas, ahora son solo dos.
 """
+import cv2
+import numpy as np
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -30,8 +32,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.detection.event_publisher import InProcessPublisher
+from app.core.detection.pipeline import DetectionPipeline
+from app.core.detection.pipeline_worker import DetectionPipelineWorker
+from app.core.detection.pose import PoseEstimator
 from app.core.detection.schemas import Zone
+from app.core.detection.state_machine import InteractionState, InteractionStateMachine
+from app.core.detection.tracker import PersonTracker
 from app.core.detection.zone import ZoneManager
+from app.core.ingestion.frame_source import VideoFileFrameSource
 from app.core.ingestion.video_loader import VideoLoadError, extract_thumbnail, load_video
 from app.ui.widgets.footer import FooterBar
 from app.ui.widgets.header import HeaderBar
@@ -179,6 +188,16 @@ class ZoneEditorTab(QWidget):
         super().__init__()
         self.zone_manager = ZoneManager()
         self._current_video_id: Optional[str] = None
+        self._current_video_path: Optional[Path] = None
+        self._current_video_fps: float = 30.0
+        self._debug_worker: Optional[DetectionPipelineWorker] = None
+        self._debug_reference_image: Optional[QImage] = None
+        self._debug_zones: List[Zone] = []
+        # Referencia a la state_machine de la corrida de debug actual: se
+        # necesita en `_on_debug_frame` para saber en qué estado
+        # (IDLE/REACHING/HOLDING) está cada (track_id, zone_id) y así
+        # colorear/etiquetar igual que `scripts/run_pipeline_debug.py`.
+        self._debug_state_machine: Optional[InteractionStateMachine] = None
         self._build_ui()
         self._refresh_zone_list()
 
@@ -226,10 +245,13 @@ class ZoneEditorTab(QWidget):
         self.btn_undo.clicked.connect(self._on_undo)
         self.btn_clear = QPushButton("Limpiar puntos")
         self.btn_clear.clicked.connect(self._on_clear)
+        self.btn_debug = QPushButton(" Ver detección (debug)")
+        self.btn_debug.clicked.connect(self.on_run_debug)
 
         actions.addWidget(self.btn_load)
         actions.addWidget(self.btn_undo)
         actions.addWidget(self.btn_clear)
+        actions.addWidget(self.btn_debug)
         actions.addStretch()
         layout.addLayout(actions)
 
@@ -274,6 +296,9 @@ class ZoneEditorTab(QWidget):
         layout.addWidget(hint)
 
         buttons_row = QHBoxLayout()
+        self.btn_delete = QPushButton(" Eliminar zona")
+        self.btn_delete.clicked.connect(self._on_delete_zone)
+
         self.btn_cancel = QPushButton("Cancelar")
         self.btn_cancel.clicked.connect(self._on_clear)
 
@@ -281,6 +306,7 @@ class ZoneEditorTab(QWidget):
         self.btn_save.setObjectName("primary")
         self.btn_save.clicked.connect(self._on_save)
 
+        buttons_row.addWidget(self.btn_delete)
         buttons_row.addWidget(self.btn_cancel)
         buttons_row.addWidget(self.btn_save)
         layout.addLayout(buttons_row)
@@ -310,6 +336,8 @@ class ZoneEditorTab(QWidget):
                 raise VideoLoadError(f"No se pudo leer la miniatura: {thumb_path}")
             self.canvas.set_frame(image)
             self._current_video_id = video_info.path.stem
+            self._current_video_path = video_info.path
+            self._current_video_fps = video_info.fps or 30.0
             self.header.set_source_name(video_info.filename)
             self._refresh_zone_list()
             self._log(f"✅ Frame de referencia cargado: {video_info.filename} "
@@ -325,6 +353,203 @@ class ZoneEditorTab(QWidget):
         self.canvas.clear_points()
         self.name_input.clear()
         self._refresh_zone_list()
+
+    # ------------------------------------------------- debug de detección --
+    def on_run_debug(self):
+        """
+        Corre el pipeline sobre el mismo video que está cargado en el
+        lienzo, en un QThread (DetectionPipelineWorker) — no un proceso
+        aparte. El frame anotado (cajas + IDs + pose + zonas + estados)
+        se muestra directamente sobre el lienzo del ROI, reemplazando
+        temporalmente el frame de referencia mientras corre.
+        """
+        if self._current_video_path is None:
+            QMessageBox.warning(self, "Sin video", "Carga primero un video con 'Cargar video'.")
+            return
+        if self.canvas.points:
+            QMessageBox.warning(
+                self, "Dibujo en curso",
+                "Guarda o descarta ('Limpiar puntos') el polígono actual antes de correr el debug.",
+            )
+            return
+        if self._debug_worker is not None and self._debug_worker.isRunning():
+            QMessageBox.warning(self, "En curso", "Ya hay un debug corriendo, espera a que termine.")
+            return
+
+        self._debug_zones = self.zone_manager.load_zones(self._current_video_id)
+        if not self._debug_zones:
+            self._log(
+                f"⚠️ No hay zonas guardadas para '{self._current_video_id}' — se va a "
+                "mostrar el video sin zonas dibujadas."
+            )
+
+        try:
+            source = VideoFileFrameSource(self._current_video_path)
+        except (FileNotFoundError, IOError) as exc:
+            self._log(f"❌ No se pudo abrir el video: {exc}")
+            return
+
+        tracker = PersonTracker()
+        pose_estimator = PoseEstimator()
+        state_machine = InteractionStateMachine(fps=self._current_video_fps)
+        # Se guarda la referencia para que `_on_debug_frame` pueda leer
+        # `state_machine.states` y reproducir el mismo coloreado/etiquetado
+        # de HOLDING/REACHING que usa `run_pipeline_debug.py` (sección B).
+        self._debug_state_machine = state_machine
+        publisher = InProcessPublisher()
+        pipeline = DetectionPipeline(tracker, pose_estimator, self.zone_manager, state_machine, publisher)
+
+        # ~10 actualizaciones de imagen por segundo, sin importar el fps
+        # real del video — evita saturar la cola de eventos de Qt.
+        frame_every_n = max(1, round(self._current_video_fps / 10))
+
+        self._debug_reference_image = self.canvas._image
+
+        self._debug_worker = DetectionPipelineWorker(pipeline, source, frame_every_n=frame_every_n)
+        self._debug_worker.frame_processed.connect(self._on_debug_frame)
+        self._debug_worker.pipeline_finished.connect(self._on_debug_finished)
+        self._debug_worker.pipeline_failed.connect(self._on_debug_failed)
+
+        self.btn_debug.setEnabled(False)
+        self.btn_load.setEnabled(False)
+        self._log(f" Corriendo debug de detección sobre {self._current_video_path.name} (en el lienzo)...")
+        self._debug_worker.start()
+
+    def _on_debug_frame(self, frame, call_count, tracked_people, pose_results):
+        """
+        Dibuja sobre el frame la MISMA anotación completa que
+        `scripts/run_pipeline_debug.py` (zonas + nombre, bounding boxes +
+        ID + estado HOLDING/REACHING con color, y pose/keypoints de
+        brazos), en vez de solo cajas + polígonos.
+
+        Reutiliza `self._debug_state_machine.states` (poblada por el
+        `DetectionPipeline` que corre en el worker) para saber en qué
+        estado está cada (track_id, zone_id), igual que hace el script
+        de debug por línea de comandos.
+        """
+        annotated = frame.copy()
+
+        # A. Dibujar zonas + nombre (igual que run_pipeline_debug.py, sección A)
+        for zone in self._debug_zones:
+            if len(zone.polygon) >= 3:
+                pts = np.array(zone.polygon, dtype=np.int32).reshape((-1, 1, 2))
+                cv2.polylines(annotated, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
+                cv2.putText(
+                    annotated,
+                    zone.name,
+                    (int(zone.polygon[0][0]), int(zone.polygon[0][1]) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2,
+                )
+
+        # B. Dibujar personas trackeadas, ID y estado de interacción
+        #    (igual que run_pipeline_debug.py, sección B)
+        state_machine = self._debug_state_machine
+        for person in tracked_people:
+            tid = person.track_id
+            x1, y1, x2, y2 = map(int, person.bbox)
+
+            current_state = InteractionState.IDLE
+            active_zone = ""
+            if state_machine is not None:
+                for (t_id, z_id), (state, _) in state_machine.states.items():
+                    if t_id == tid and state != InteractionState.IDLE:
+                        current_state = state
+                        active_zone = z_id
+                        break
+
+            if current_state == InteractionState.HOLDING:
+                color = (0, 0, 255)  # Rojo para HOLDING
+                label = f"ID: {tid} - HOLDING ({active_zone})"
+            elif current_state == InteractionState.REACHING:
+                color = (0, 255, 255)  # Amarillo para REACHING
+                label = f"ID: {tid} - REACHING ({active_zone})"
+            else:
+                color = (255, 0, 0)  # Azul para IDLE
+                label = f"ID: {tid}"
+
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(
+                annotated,
+                label,
+                (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                2,
+            )
+
+        # C. Dibujar keypoints y líneas de brazos de la pose
+        #    (igual que run_pipeline_debug.py, sección C)
+        for pose in pose_results:
+            joints = [
+                pose.left_shoulder, pose.right_shoulder,
+                pose.left_elbow, pose.right_elbow,
+                pose.left_wrist, pose.right_wrist,
+            ]
+            for kp in joints:
+                if kp.confidence > 0.3:
+                    cv2.circle(annotated, (int(kp.x), int(kp.y)), 5, (0, 255, 255), -1)
+
+            # Brazo izquierdo
+            if pose.left_shoulder.confidence > 0.3 and pose.left_elbow.confidence > 0.3:
+                cv2.line(
+                    annotated,
+                    (int(pose.left_shoulder.x), int(pose.left_shoulder.y)),
+                    (int(pose.left_elbow.x), int(pose.left_elbow.y)),
+                    (255, 128, 0),
+                    2,
+                )
+            if pose.left_elbow.confidence > 0.3 and pose.left_wrist.confidence > 0.3:
+                cv2.line(
+                    annotated,
+                    (int(pose.left_elbow.x), int(pose.left_elbow.y)),
+                    (int(pose.left_wrist.x), int(pose.left_wrist.y)),
+                    (255, 128, 0),
+                    2,
+                )
+            # Brazo derecho
+            if pose.right_shoulder.confidence > 0.3 and pose.right_elbow.confidence > 0.3:
+                cv2.line(
+                    annotated,
+                    (int(pose.right_shoulder.x), int(pose.right_shoulder.y)),
+                    (int(pose.right_elbow.x), int(pose.right_elbow.y)),
+                    (0, 128, 255),
+                    2,
+                )
+            if pose.right_elbow.confidence > 0.3 and pose.right_wrist.confidence > 0.3:
+                cv2.line(
+                    annotated,
+                    (int(pose.right_elbow.x), int(pose.right_elbow.y)),
+                    (int(pose.right_wrist.x), int(pose.right_wrist.y)),
+                    (0, 128, 255),
+                    2,
+                )
+
+        rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+        self.canvas.set_frame(qimg)
+
+    def _on_debug_finished(self, total_frames: int):
+        self.btn_debug.setEnabled(True)
+        self.btn_load.setEnabled(True)
+        self._debug_state_machine = None
+        if self._debug_reference_image is not None:
+            self.canvas.set_frame(self._debug_reference_image)
+            self._refresh_zone_list()
+        self._log(f"✅ Debug terminado — {total_frames} frames procesados.")
+
+    def _on_debug_failed(self, message: str):
+        self.btn_debug.setEnabled(True)
+        self.btn_load.setEnabled(True)
+        self._debug_state_machine = None
+        if self._debug_reference_image is not None:
+            self.canvas.set_frame(self._debug_reference_image)
+            self._refresh_zone_list()
+        self._log(f"❌ Falló el debug: {message}")
 
     def _on_save(self):
         """Guarda la zona dibujada con el esquema `Zone` vía ZoneManager."""
@@ -422,6 +647,30 @@ class ZoneEditorTab(QWidget):
         item.setData(Qt.UserRole, zone_id)
         self.zone_list.addItem(item)
         self.zone_list.setItemWidget(item, row)
+
+    def _on_delete_zone(self):
+        items = self.zone_list.selectedItems()
+        if not items:
+            QMessageBox.information(self, "Sin selección", "Selecciona una zona guardada de la lista para eliminarla.")
+            return
+        zone_id = items[0].data(Qt.UserRole)
+        if zone_id is None:
+            QMessageBox.information(self, "Sin selección", "Esa fila es el polígono en construcción, no una zona guardada.")
+            return
+        zone = self._zones.get(zone_id)
+        name = zone.name if zone else zone_id
+        confirm = QMessageBox.question(
+            self, "Eliminar zona",
+            f"¿Eliminar la zona \"{name}\"? Esta acción no se puede deshacer.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        self.zone_manager.delete_zone(self._current_video_id, zone_id)
+        self._log(f" Zona eliminada: {zone_id} — {name}")
+        self.canvas.existing_zone = None
+        self.canvas.update()
+        self._refresh_zone_list()
 
     def _on_zone_selected(self):
         items = self.zone_list.selectedItems()

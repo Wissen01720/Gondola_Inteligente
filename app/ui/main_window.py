@@ -103,13 +103,13 @@ class VideoIngestTab(QWidget):
         # no muestra estos botones. Se dejan aquí, discretos, para no perder
         # la función mientras se decide dónde van (¿toolbar? ¿menú contextual?).
         actions_row = QHBoxLayout()
-        self.btn_clean = QPushButton("🧹 Limpiar sel.")
+        self.btn_clean = QPushButton(" Limpiar sel.")
         self.btn_clean.clicked.connect(self.on_clean_videos)
         self.btn_clean.setEnabled(False)
-        self.btn_clean_all = QPushButton("🧹 Limpiar todos")
+        self.btn_clean_all = QPushButton(" Limpiar todos")
         self.btn_clean_all.clicked.connect(self.on_clean_all)
         self.btn_clean_all.setEnabled(False)
-        self.btn_cut = QPushButton("✂️ Cortar video")
+        self.btn_cut = QPushButton(" Cortar video")
         self.btn_cut.clicked.connect(self.on_cut_video)
         self.btn_cut.setEnabled(False)
         actions_row.addWidget(self.btn_clean)
@@ -137,7 +137,7 @@ class VideoIngestTab(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        title = QLabel("\U0001F4F9 Subir nuevo video")
+        title = QLabel("Subir nuevo video")
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
 
@@ -244,7 +244,7 @@ class VideoIngestTab(QWidget):
         # Solo interfaz por ahora: el recorte real queda pendiente de
         # backend (ver TODO en cut_video_dialog.py).
         self._log(
-            f"✂️ Rango de recorte elegido: {start_sec:.0f}s a {end_sec:.0f}s "
+            f" Rango de recorte elegido: {start_sec:.0f}s a {end_sec:.0f}s "
             f"(recorte real pendiente de backend)."
         )
 
