@@ -1,0 +1,24 @@
+{
+    "zone_id": "zone_2",
+    "video_id": "USA CCTV Market Camera_clean",
+    "name": "Estante 1 centro",
+    "polygon": [
+        [
+            632.41,
+            417.39
+        ],
+        [
+            827.19,
+            440.16
+        ],
+        [
+            801.9,
+            708.3
+        ],
+        [
+            589.41,
+            680.47
+        ]
+    ],
+    "zone_type": "product"
+}
