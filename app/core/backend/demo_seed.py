@@ -12,7 +12,13 @@ demostrable de inmediato — y deje de usarse en cuanto haya eventos reales.
 import random
 
 from app.core.backend.event_store import EventStore
-from app.core.detection.schemas import DwellRecord, InteractionEvent, Zone
+from app.core.detection.schemas import DwellRecord, InteractionEvent, PositionSample, Zone
+
+# Resolución del frame de referencia (la misma que el video ya limpiado en
+# data/processed/USA CCTV Market Camera_clean.json) — los polígonos de zona
+# están expresados en estos ejes, así que las trayectorias sintéticas deben
+# moverse en el mismo espacio de píxeles para que el heatmap calce con el ROI.
+FRAME_SIZE = (1280, 720)
 
 
 def has_data(store: EventStore) -> bool:
@@ -20,11 +26,67 @@ def has_data(store: EventStore) -> bool:
     return store.count_events() > 0
 
 
+def _polygon_centroid(polygon: list[tuple[float, float]]) -> tuple[float, float]:
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
+def _seed_walk_to_zone(store: EventStore, rng: random.Random, track_id: int,
+                        centroid: tuple[float, float], entry_ts: float, exit_ts: float,
+                        is_employee: bool) -> None:
+    """
+    Publica los `PositionSample` (pie de la persona, por frame) de una
+    caminata desde un punto de entrada al borde del frame hasta el
+    centroide de la zona, y una permanencia con jitter mientras dura el
+    dwell — es el mismo dato continuo que en producción publica el pipeline
+    en cada frame (`app/core/detection/trajectory.py`), aquí sintetizado
+    para que el heatmap tenga algo que dibujar sin correr el pipeline.
+    """
+    w, h = FRAME_SIZE
+    edge = rng.choice(["left", "right", "top", "bottom"])
+    if edge == "left":
+        start = (0.0, rng.uniform(0, h))
+    elif edge == "right":
+        start = (w, rng.uniform(0, h))
+    elif edge == "top":
+        start = (rng.uniform(0, w), 0.0)
+    else:
+        start = (rng.uniform(0, w), h)
+
+    walk_steps = rng.randint(8, 14)
+    frame = 0
+    for i in range(walk_steps):
+        frac = (i + 1) / walk_steps
+        x = start[0] + (centroid[0] - start[0]) * frac + rng.uniform(-12, 12)
+        y = start[1] + (centroid[1] - start[1]) * frac + rng.uniform(-12, 12)
+        ts = entry_ts - (walk_steps - i) * ((entry_ts - (entry_ts - 2.5)) / walk_steps)
+        store.insert_position_sample(PositionSample(
+            track_id=track_id, frame_index=frame, original_timestamp_sec=round(max(ts, 0.0), 2),
+            foot_position=(round(x, 1), round(y, 1)), is_employee=is_employee,
+        ))
+        frame += 1
+
+    # Permanencia frente a la zona: el pie se queda cerca del centroide con
+    # jitter pequeño (la persona no está perfectamente inmóvil).
+    dwell_steps = max(3, int((exit_ts - entry_ts)))
+    for i in range(dwell_steps):
+        ts = entry_ts + (exit_ts - entry_ts) * (i / max(dwell_steps - 1, 1))
+        x = centroid[0] + rng.uniform(-20, 20)
+        y = centroid[1] + rng.uniform(-20, 20)
+        store.insert_position_sample(PositionSample(
+            track_id=track_id, frame_index=frame, original_timestamp_sec=round(ts, 2),
+            foot_position=(round(x, 1), round(y, 1)), is_employee=is_employee,
+        ))
+        frame += 1
+
+
 def seed_demo_session(store: EventStore, zones: list[Zone], seed: int = 7) -> int:
     """
-    Genera eventos `taken`/`returned` + `DwellRecord` para las zonas de tipo
-    'product' de `zones`, respetando la alternancia taken->returned->taken
-    por track (la misma regla que aplica `state_machine.py`).
+    Genera eventos `taken`/`returned` + `DwellRecord` + `PositionSample`
+    (trayectorias de pie) para las zonas de tipo 'product' de `zones`,
+    respetando la alternancia taken->returned->taken por track (la misma
+    regla que aplica `state_machine.py`).
 
     Devuelve la cantidad de InteractionEvent insertados.
     """
@@ -38,6 +100,7 @@ def seed_demo_session(store: EventStore, zones: list[Zone], seed: int = 7) -> in
     t = 4.0
 
     for zone in product_zones:
+        centroid = _polygon_centroid(zone.polygon)
         visits = rng.randint(6, 11)
         for _ in range(visits):
             track_id = next_track_id
@@ -47,6 +110,8 @@ def seed_demo_session(store: EventStore, zones: list[Zone], seed: int = 7) -> in
             entry = t
             dwell = round(rng.uniform(2.0, 9.0), 1)
             exit_ts = entry + dwell
+
+            _seed_walk_to_zone(store, rng, track_id, centroid, entry, exit_ts, is_employee)
 
             store.insert_event(InteractionEvent(
                 track_id=track_id, zone_id=zone.zone_id, action="taken",

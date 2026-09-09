@@ -13,8 +13,10 @@ silenciosa.
 """
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QRectF
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+import cv2
+import numpy as np
+from PySide6.QtCore import QPointF, Qt, QTimer, QRectF
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -31,8 +33,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.backend.demo_seed import has_data, seed_demo_session
+from app.core.backend.demo_seed import FRAME_SIZE, has_data, seed_demo_session
 from app.core.backend.event_store import EventStore
+from app.core.backend.heatmap import build_density_grid
+from app.core.detection.schemas import Zone
 from app.core.detection.zone import ZoneManager
 from app.ui.theme import Colors
 from app.ui.widgets.header import HeaderBar
@@ -41,7 +45,6 @@ from app.utils import config
 TAKEN_COLOR = Colors.ACCENT
 RETURNED_COLOR = Colors.INFO_BLUE
 EMPLOYEE_COLOR = Colors.WARNING
-CUSTOMER_COLOR = Colors.SUCCESS
 
 REFRESH_INTERVAL_MS = 3000
 
@@ -259,42 +262,95 @@ class TimelineChart(QWidget):
         painter.end()
 
 
-class DonutChart(QWidget):
-    """Dona de dos segmentos: clientes vs. personal."""
+class HeatmapWidget(QWidget):
+    """
+    Mapa de calor de circulación sobre el layout real de la góndola.
+
+    Construido con `build_density_grid` (app/core/backend/heatmap.py) a
+    partir de los `PositionSample.foot_position` almacenados — los mismos
+    "puntos de pie" que publica el pipeline por cada frame y cada persona
+    trackeada. Sobre esa cuadrícula se dibuja el contorno de cada zona
+    (sólido = producto, punteado = personal) en su posición real.
+    """
+
+    GRID_SIZE = (64, 36)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._segments: list[tuple[str, int, str]] = []
-        self.setMinimumSize(140, 140)
+        self._samples = []
+        self._zones: list[Zone] = []
+        self._frame_size = FRAME_SIZE
+        self.setMinimumHeight(260)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
-    def set_data(self, segments: list[tuple[str, int, str]]):
-        self._segments = segments
+    def set_data(self, samples, zones: list[Zone], frame_size: tuple[int, int] = FRAME_SIZE):
+        self._samples = samples
+        self._zones = zones
+        self._frame_size = frame_size
         self.update()
+
+    def _draw_area_rect(self) -> QRectF:
+        """ROI dibujable dentro del widget, respetando el aspecto del frame."""
+        frame_w, frame_h = self._frame_size
+        aspect = frame_w / frame_h
+        w, h = self.width(), self.height()
+        if w / h > aspect:
+            draw_h = h
+            draw_w = h * aspect
+        else:
+            draw_w = w
+            draw_h = w / aspect
+        return QRectF((w - draw_w) / 2, (h - draw_h) / 2, draw_w, draw_h)
 
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        total = sum(v for _, v, _ in self._segments)
-        side = min(self.width(), self.height()) - 20
-        rect = QRectF((self.width() - side) / 2, (self.height() - side) / 2, side, side)
-        pen_w = max(10, side * 0.14)
-        inner_rect = rect.adjusted(pen_w / 2, pen_w / 2, -pen_w / 2, -pen_w / 2)
+        draw_rect = self._draw_area_rect()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(Colors.BG_INPUT))
+        painter.drawRoundedRect(draw_rect, 6, 6)
 
-        painter.setPen(QPen(QColor(Colors.BG_INPUT), pen_w))
-        painter.drawArc(inner_rect, 0, 360 * 16)
+        if self._samples:
+            cols, rows = self.GRID_SIZE
+            grid = build_density_grid(self._samples, self._frame_size, grid_size=self.GRID_SIZE, sigma=1.2)
+            peak = float(grid.max()) or 1.0
+            normalized = np.clip((grid / peak) * 255, 0, 255).astype(np.uint8)
+            colored_bgr = cv2.applyColorMap(normalized, cv2.COLORMAP_INFERNO)
+            colored_rgb = cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
+            # Celdas casi vacías se dejan transparentes para no pintar todo
+            # el frame de "azul oscuro" cuando en realidad no hay muestras ahí.
+            alpha = np.where(normalized > 6, 235, 0).astype(np.uint8)
+            rgba = np.ascontiguousarray(np.dstack([colored_rgb, alpha]))
+            image = QImage(rgba.data, cols, rows, rgba.strides[0], QImage.Format_RGBA8888)
+            painter.drawImage(draw_rect, image)
 
-        if total > 0:
-            start_angle = 90 * 16
-            for _, value, color in self._segments:
-                span = int(-(value / total) * 360 * 16)
-                painter.setPen(QPen(QColor(color), pen_w, cap=Qt.FlatCap))
-                painter.drawArc(inner_rect, start_angle, span)
-                start_angle += span
+        frame_w, frame_h = self._frame_size
+        sx, sy = draw_rect.width() / frame_w, draw_rect.height() / frame_h
 
-        painter.setPen(QColor(Colors.TEXT_PRIMARY))
-        painter.setFont(QFont("Segoe UI", 16, QFont.Bold))
-        painter.drawText(rect, Qt.AlignCenter, str(total))
+        def to_widget(point: tuple[float, float]) -> QPointF:
+            return QPointF(draw_rect.left() + point[0] * sx, draw_rect.top() + point[1] * sy)
+
+        for zone in self._zones:
+            is_staff = zone.zone_type == "staff"
+            pen = QPen(QColor(Colors.INFO_BLUE if not is_staff else Colors.WARNING), 2)
+            if is_staff:
+                pen.setStyle(Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPolygon(QPolygonF([to_widget(p) for p in zone.polygon]))
+
+            centroid = to_widget((
+                sum(p[0] for p in zone.polygon) / len(zone.polygon),
+                sum(p[1] for p in zone.polygon) / len(zone.polygon),
+            ))
+            painter.setFont(QFont("Consolas", 7))
+            painter.setPen(QColor(Colors.TEXT_PRIMARY))
+            painter.drawText(centroid, zone.name)
+
+        painter.setPen(QPen(QColor(Colors.BORDER), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(draw_rect, 6, 6)
 
         painter.end()
 
@@ -366,7 +422,7 @@ class DashboardTab(QWidget):
         self.kpi_total = KpiCard("INTERACCIONES TOTALES")
         self.kpi_take_rate = KpiCard("TASA DE TOMA NETA")
         self.kpi_dwell = KpiCard("DWELL PROMEDIO")
-        self.kpi_employee = KpiCard("INTERACCIÓN DE PERSONAL")
+        self.kpi_employee = KpiCard("PERSONAL DETECTADO (STAFF)")
         self.kpi_zones = KpiCard("ZONAS ACTIVAS")
         for kpi in (self.kpi_total, self.kpi_take_rate, self.kpi_dwell, self.kpi_employee, self.kpi_zones):
             kpi_row.addWidget(kpi)
@@ -403,19 +459,12 @@ class DashboardTab(QWidget):
         recent_card.body.addWidget(self.events_table)
         grid.addWidget(recent_card, 2, 0)
 
-        donut_card = Card("Cliente vs. personal", "StaffZoneTracker · is_employee")
-        donut_row = QHBoxLayout()
-        self.donut = DonutChart()
-        donut_row.addWidget(self.donut)
-        legend_col = QVBoxLayout()
-        self.legend_customer = QLabel()
-        self.legend_employee = QLabel()
-        legend_col.addWidget(self.legend_customer)
-        legend_col.addWidget(self.legend_employee)
-        legend_col.addStretch()
-        donut_row.addLayout(legend_col, stretch=1)
-        donut_card.body.addLayout(donut_row)
-        grid.addWidget(donut_card, 0, 1)
+        heatmap_card = Card("Mapa de calor de circulación", "PositionSample.foot_position sobre el ROI real")
+        self.heatmap = HeatmapWidget()
+        self.heatmap_empty = EmptyState("Sin muestras de posición aún (PositionSample vacío).")
+        heatmap_card.body.addWidget(self.heatmap)
+        heatmap_card.body.addWidget(self.heatmap_empty)
+        grid.addWidget(heatmap_card, 0, 1)
 
         perf_card = Card("Zonas con más movimiento", "Ranking por eventos totales")
         self.ranking_label = QLabel("")
@@ -427,8 +476,8 @@ class DashboardTab(QWidget):
         legend_layout = QVBoxLayout()
         legend_layout.addWidget(self._legend_row(TAKEN_COLOR, "Tomado (taken)"))
         legend_layout.addWidget(self._legend_row(RETURNED_COLOR, "Devuelto (returned)"))
-        legend_layout.addWidget(self._legend_row(CUSTOMER_COLOR, "Cliente"))
-        legend_layout.addWidget(self._legend_row(EMPLOYEE_COLOR, "Personal"))
+        legend_layout.addWidget(self._legend_row(Colors.INFO_BLUE, "Zona de producto (ROI)"))
+        legend_layout.addWidget(self._legend_row(EMPLOYEE_COLOR, "Zona de personal (ROI)"))
         legend_card.body.addLayout(legend_layout)
         grid.addWidget(legend_card, 2, 1)
 
@@ -490,6 +539,7 @@ class DashboardTab(QWidget):
         zone_rows = self.store.get_zone_breakdown()
         timeline = self.store.get_timeline(bucket_sec=30.0)
         recent = self.store.get_recent_events(limit=15)
+        position_samples = self.store.get_position_samples()
 
         is_demo = not has_data(self.store)
         self.btn_seed.setEnabled(is_demo)
@@ -521,16 +571,11 @@ class DashboardTab(QWidget):
         self.timeline_chart.setVisible(len(timeline) >= 2)
         self.timeline_empty.setVisible(len(timeline) < 2)
 
-        # Donut
-        employee = summary["employee_events"]
-        customer = summary["total_events"] - employee
-        self.donut.set_data([("Clientes", customer, CUSTOMER_COLOR), ("Personal", employee, EMPLOYEE_COLOR)])
-        pct_customer = (customer / summary["total_events"] * 100) if summary["total_events"] else 0.0
-        pct_employee = (employee / summary["total_events"] * 100) if summary["total_events"] else 0.0
-        self.legend_customer.setText(f"● Clientes — {customer} ({pct_customer:.1f}%)")
-        self.legend_customer.setStyleSheet(f"color:{CUSTOMER_COLOR}; font-weight:600;")
-        self.legend_employee.setText(f"● Personal — {employee} ({pct_employee:.1f}%)")
-        self.legend_employee.setStyleSheet(f"color:{EMPLOYEE_COLOR}; font-weight:600;")
+        # Heatmap de circulación (PositionSample -> build_density_grid)
+        zones = getattr(self, "_current_zones", [])
+        self.heatmap.set_data(position_samples, zones)
+        self.heatmap.setVisible(bool(position_samples))
+        self.heatmap_empty.setVisible(not position_samples)
 
         # Ranking
         ranked = sorted(zone_rows, key=lambda r: r["taken"] + r["returned"], reverse=True)

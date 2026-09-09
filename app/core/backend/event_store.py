@@ -225,9 +225,35 @@ class EventStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    # TODO(Team 3): query_position_samples(rango_tiempo, zone/camera filter)
-    # para alimentar el heatmap con datos reales en vez de la cuadrícula
-    # agregada; stats por sesión/video_id cuando `events` gane esa columna.
+    def get_position_samples(self, limit: int = 6000) -> list[PositionSample]:
+        """
+        Muestras de posición (pie de cada persona por frame), reconstruidas
+        como `PositionSample` — es el insumo de `build_density_grid`
+        (`app/core/backend/heatmap.py`) para el mapa de calor del dashboard.
+
+        `limit` acota cuántas muestras recientes se traen: una sesión larga
+        puede acumular decenas de miles de filas y el heatmap no necesita
+        más que unos miles de puntos para verse denso.
+        """
+        rows = self._conn.execute(
+            "SELECT track_id, frame_index, timestamp, foot_x, foot_y, camera_id, is_employee "
+            "FROM position_samples ORDER BY timestamp DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            PositionSample(
+                track_id=r["track_id"],
+                frame_index=r["frame_index"],
+                original_timestamp_sec=r["timestamp"],
+                foot_position=(r["foot_x"], r["foot_y"]),
+                camera_id=r["camera_id"],
+                is_employee=bool(r["is_employee"]),
+            )
+            for r in rows
+        ]
+
+    # TODO(Team 3): filtro por rango de tiempo/zona en get_position_samples;
+    # stats por sesión/video_id cuando `events` gane esa columna.
 
     def close(self) -> None:
         self._conn.close()
