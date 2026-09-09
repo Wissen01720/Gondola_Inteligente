@@ -398,5 +398,9 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(VideoIngestTab(), "1. Carga y Limpieza de Video")
         tabs.addTab(ZoneEditorTab(), "2. Edición de Zonas (ROI)")
+        # Futuras pestañas (ya con el espacio reservado en la arquitectura):
+        # tabs.addTab(DetectionTab(), "3. Detección y Tracking")
+        # tabs.addTab(InteractionTab(), "4. Eventos de Interacción")
+        # tabs.addTab(DashboardTab(), "5. Dashboard de Métricas")
 
         self.setCentralWidget(tabs)

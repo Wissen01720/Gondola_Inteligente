@@ -1,3 +1,4 @@
+
 """
 Configuración global del proyecto Scapder Vision.
 Todos los parámetros ajustables viven aquí para no tocar código
@@ -88,4 +89,4 @@ Path(EVENTS_LOCAL_LOG_PATH).mkdir(parents=True, exist_ok=True)
 SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- UI: identidad visual (Header/Footer) ---
-ENGINE_VERSION = "VISION_ENGINE v2.4.0-STABLE" 
+ENGINE_VERSION = "VISION_ENGINE v2.4.0-STABLE"

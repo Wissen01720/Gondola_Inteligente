@@ -4,8 +4,8 @@ futuro: detección, tracking) debe correr aquí, nunca en el hilo de UI.
 """
 from PySide6.QtCore import QThread, Signal
 
-from app.core.video_cleaner import clean_video
-from app.core.video_loader import VideoInfo
+from app.core.ingestion.video_cleaner import clean_video
+from app.core.ingestion.video_loader import VideoInfo
 
 
 class VideoCleaningWorker(QThread):
