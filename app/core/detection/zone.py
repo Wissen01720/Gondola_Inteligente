@@ -18,7 +18,7 @@ from app.utils.security import sanitize_filename_component
 _polygon_cache: Dict[str, Polygon] = {}
 
 
-def normalize_video_id(video_id: str) -> str:
+def normalize_video_id(video_id: str, is_live: bool = False) -> str:
     """
     Normaliza un `video_id` a la forma canónica de la sesión.
 
@@ -34,8 +34,15 @@ def normalize_video_id(video_id: str) -> str:
     También sanitiza `video_id` (ver `sanitize_filename_component`): este
     valor se usa tal cual como nombre de carpeta en disco, y en último
     término viene del nombre de un archivo subido por el usuario.
+
+    `is_live=True` es para las sesiones de cámara en directo: ahí no hay
+    ningún archivo que limpiar, así que el sufijo `_clean` sería una
+    mentira ("camara_movil_clean" no existe en ninguna parte). Se sanitiza
+    igual, porque el id termina siendo un nombre de carpeta.
     """
     video_id = sanitize_filename_component(video_id, fallback="video")
+    if is_live:
+        return video_id
     return video_id if video_id.endswith("_clean") else f"{video_id}_clean"
 
 
@@ -55,7 +62,19 @@ def is_point_in_polygon(x: float, y: float, zone: Zone) -> bool:
     return Point(x, y).within(_get_cached_polygon(zone))
 
 class ZoneManager:
-    """Administra la carga y persistencia de las zonas de la góndola, agrupadas por video/cámara."""
+    """
+    Carga y persistencia de las zonas, agrupadas por video o cámara.
+
+    **El `video_id` llega ya normalizado.** `ZoneManager` solo lo sanitiza
+    para poder usarlo como nombre de carpeta; no le añade ni le quita
+    sufijos. Antes normalizaba por su cuenta y eso rompía las sesiones en
+    directo: el editor guardaba las zonas en `camara_movil_clean/` mientras
+    el pipeline las buscaba en `camara_movil/`, así que un análisis en vivo
+    no encontraba ninguna zona y no medía ni una interacción, en silencio.
+
+    Quien crea la sesión decide la forma canónica del id, una sola vez, con
+    `normalize_video_id(..., is_live=...)`.
+    """
 
     def __init__(self, storage_path: str = ZONES_STORAGE_PATH):
         self.storage_path = Path(storage_path)
@@ -67,7 +86,7 @@ class ZoneManager:
         video (sobreescribe si `zone.zone_id` ya existe — así una edición
         de puntos actualiza el mismo archivo en vez de crear uno nuevo).
         """
-        video_id = normalize_video_id(zone.video_id)
+        video_id = sanitize_filename_component(zone.video_id, fallback="video")
         zone_id = sanitize_filename_component(zone.zone_id, fallback="zone")
         if video_id != zone.video_id or zone_id != zone.zone_id:
             zone = zone.model_copy(update={"video_id": video_id, "zone_id": zone_id})
@@ -80,7 +99,7 @@ class ZoneManager:
     def load_zones(self, video_id: str) -> List[Zone]:
         """Carga las zonas guardadas para un video/cámara específico (no mezcla con otros)."""
         zones = []
-        video_dir = self.storage_path / normalize_video_id(video_id)
+        video_dir = self.storage_path / sanitize_filename_component(video_id, fallback="video")
         if not video_dir.exists():
             return zones
         for file_path in video_dir.glob("*.json"):
@@ -102,7 +121,11 @@ class ZoneManager:
         existe" y "se acaba de borrar" tienen el mismo resultado neto).
         """
         zone_id = sanitize_filename_component(zone_id, fallback="zone")
-        file_path = self.storage_path / normalize_video_id(video_id) / f"{zone_id}.json"
+        file_path = (
+            self.storage_path
+            / sanitize_filename_component(video_id, fallback="video")
+            / f"{zone_id}.json"
+        )
         if not file_path.exists():
             return False
         file_path.unlink()

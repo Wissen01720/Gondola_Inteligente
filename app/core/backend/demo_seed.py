@@ -21,9 +21,16 @@ from app.core.detection.schemas import DwellRecord, InteractionEvent, PositionSa
 FRAME_SIZE = (1280, 720)
 
 
-def has_data(store: EventStore) -> bool:
-    """True si la sesión ya tiene al menos un evento real registrado."""
-    return store.count_events() > 0
+def has_data(store: EventStore, video_id: str | None = None) -> bool:
+    """
+    True si la sesión ya tiene al menos un evento **real** (no sembrado).
+
+    Antes esto contaba todos los eventos, así que sembrar la demo lo volvía
+    True y el dashboard dejaba de avisar que estaba mostrando datos
+    sintéticos. Ahora las filas de demo no cuentan: el aviso se mantiene
+    hasta que haya un análisis de verdad.
+    """
+    return store.count_real_events(video_id) > 0
 
 
 def _polygon_centroid(polygon: list[tuple[float, float]]) -> tuple[float, float]:
@@ -81,12 +88,22 @@ def _seed_walk_to_zone(store: EventStore, rng: random.Random, track_id: int,
         frame += 1
 
 
-def seed_demo_session(store: EventStore, zones: list[Zone], seed: int = 7) -> int:
+def seed_demo_session(
+    store: EventStore,
+    zones: list[Zone],
+    seed: int = 7,
+    video_id: str | None = None,
+) -> int:
     """
     Genera eventos `taken`/`returned` + `DwellRecord` + `PositionSample`
     (trayectorias de pie) para las zonas de tipo 'product' de `zones`,
     respetando la alternancia taken->returned->taken por track (la misma
     regla que aplica `state_machine.py`).
+
+    Todo lo que se inserta queda marcado `is_demo=1` en la base, y bajo el
+    `video_id` de la sesión: son datos sintéticos, tienen que poder
+    distinguirse y borrarse sin tocar los reales. Al terminar se restaura
+    la sesión que el almacén tuviera antes.
 
     Devuelve la cantidad de InteractionEvent insertados.
     """
@@ -94,6 +111,9 @@ def seed_demo_session(store: EventStore, zones: list[Zone], seed: int = 7) -> in
     product_zones = [z for z in zones if z.zone_type == "product"]
     if not product_zones:
         return 0
+
+    previous_session = store.session_video_id
+    store.set_session(video_id or (product_zones[0].video_id if product_zones else ""), is_demo=True)
 
     next_track_id = 100
     inserted = 0
@@ -139,4 +159,6 @@ def seed_demo_session(store: EventStore, zones: list[Zone], seed: int = 7) -> in
 
             t += rng.uniform(1.5, 6.0)
 
+    store.flush()
+    store.set_session(previous_session, is_demo=False)
     return inserted

@@ -98,15 +98,29 @@ EVENTS_LOCAL_LOG_PATH = str(DATA_DIR / "events") # Carpeta de respaldo local mie
 # --- Módulo 3: Almacenamiento de eventos (backend local) ---
 EVENT_STORE_DB_PATH = str(DATA_DIR / "scapder_events.db") # SQLite local para eventos + muestras de posición
 
-# --- UI: snapshots reales para el toggle "Galería" de VideoInfoPanel ---
-# (resuelve la deuda de Fase 7: antes el toggle no tenía datos reales)
-SNAPSHOTS_DIR = DATA_DIR / "snapshots"    # 1 subcarpeta por video, con capturas anotadas (cajas de detección)
-SNAPSHOT_EVERY_N_FRAMES = 15              # cada cuántos frames procesados por el pipeline se guarda 1 snapshot
+# --- Flujo de la app: análisis lanzado desde la pestaña de zonas ---
+# El análisis corre sobre el video YA limpio. A 1 frame de cada
+# ANALYSIS_FRAME_STRIDE, un clip de demo termina en un tiempo razonable en
+# CPU sin GPU (criterio de viabilidad edge del reto). Subirlo a 1 procesa
+# todos los frames: máxima fidelidad de la máquina de estados y del dwell
+# time, pero mucho más lento.
+ANALYSIS_FRAME_STRIDE = 3
+
+# --- Auto-ROI: sugerencia de zonas sobre el frame de referencia ---
+# El frame de referencia se elige automáticamente al terminar la limpieza
+# (ver app/core/ingestion/frame_picker.py) y sobre él se proponen zonas de
+# góndola (ver app/core/detection/roi_suggester.py). Son SUGERENCIAS: no se
+# escriben en disco hasta que el usuario las acepta en la pestaña 2.
+REFERENCE_FRAME_SAMPLES = 12              # cuántos frames se muestrean para elegir el "mejor" frame
+ROI_SUGGEST_MAX_ZONES = 6                 # tope de zonas propuestas (más que esto satura el lienzo)
+ROI_SUGGEST_MIN_AREA_RATIO = 0.010        # área mínima de una zona, como fracción del área del frame
+ROI_SUGGEST_MAX_AREA_RATIO = 0.350        # área máxima (por encima de esto es pared/piso, no un estante)
+ROI_SUGGEST_MIN_ASPECT_RATIO = 0.6        # ancho/alto mínimo: un estante es más ancho que alto
+ROI_SUGGEST_MERGE_IOU = 0.25              # IoU por encima del cual dos candidatos se consideran la misma zona
 
 # Asegurar que existan los directorios
 Path(ZONES_STORAGE_PATH).mkdir(parents=True, exist_ok=True)
 Path(EVENTS_LOCAL_LOG_PATH).mkdir(parents=True, exist_ok=True)
-SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- UI: identidad visual (Header/Footer) ---
 ENGINE_VERSION = "VISION_ENGINE v2.4.0-STABLE"

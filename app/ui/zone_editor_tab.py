@@ -13,7 +13,7 @@ import numpy as np
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import QPointF, Qt, QTimer
+from PySide6.QtCore import QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QTextEdit,
@@ -32,24 +33,42 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.backend.event_store import EventStore, connect_store_to_publisher
 from app.core.detection.event_publisher import InProcessPublisher
 from app.core.detection.pipeline import DetectionPipeline
 from app.core.detection.pipeline_worker import DetectionPipelineWorker
 from app.core.detection.pose import PoseEstimator
+from app.core.detection.roi_suggester import SUGGESTED_ID_PREFIX
 from app.core.detection.schemas import Zone
 from app.core.detection.state_machine import InteractionState, InteractionStateMachine
 from app.core.detection.tracker import PersonTracker
 from app.core.detection.zone import ZoneManager, normalize_video_id
 from app.core.ingestion.frame_source import VideoFileFrameSource
+from app.core.ingestion.session import AnalysisSession
 from app.core.ingestion.video_loader import VideoLoadError, extract_thumbnail, load_video
 from app.ui.theme import Colors
 from app.ui.widgets.footer import FooterBar
 from app.ui.widgets.header import HeaderBar
-from app.utils.config import LOGS_DIR
+from app.utils.config import ANALYSIS_FRAME_STRIDE, LOGS_DIR
 
 # Colores por rol de zona, consistentes con el heatmap del Dashboard
 # (app/ui/dashboard_tab.py): producto = azul info, personal = ámbar.
-ZONE_TYPE_COLOR = {"product": Colors.INFO_BLUE, "staff": Colors.WARNING}
+#
+# Es una función y no un diccionario a nivel de módulo porque el tema se
+# cambia en caliente: un diccionario construido al importar se quedaría
+# con los colores del tema inicial para siempre.
+def zone_type_color(zone_type: str) -> str:
+    return Colors.WARNING if zone_type == "staff" else Colors.INFO_BLUE
+
+
+def suggested_color() -> str:
+    """
+    Color de las zonas propuestas y aún no guardadas.
+
+    Se distingue de las guardadas por color **y** por trazo punteado: el
+    estado de una zona no puede depender solo del color.
+    """
+    return Colors.SUCCESS
 
 
 def _polygon_area_px(points: List[Tuple[float, float]]) -> float:
@@ -100,19 +119,41 @@ class InfoBanner(QFrame):
 class ZoneCanvas(QWidget):
     """Lienzo sobre el frame de referencia: cada click agrega un vértice del polígono."""
 
+    # Emitida al agregar un vértice con el teclado, para que la pestaña
+    # refresque la lista de zonas igual que hace tras un click.
+    point_added = Signal()
+
+    # Paso del cursor de teclado, en píxeles de la imagen. Con Shift se
+    # multiplica por 10 para poder cruzar el frame sin cien pulsaciones.
+    KEY_STEP = 4
+    KEY_STEP_FAST = 40
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(480, 320)
-        self.setStyleSheet("background: #0F0E0A; border: 1px solid #332F22;")
+        # El lienzo era exclusivamente de ratón: no había forma de marcar
+        # una zona sin él. Con foco de teclado, las flechas mueven un
+        # cursor y Enter fija el vértice.
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName("Lienzo de zonas")
+        self.setAccessibleDescription(
+            "Usa las flechas para mover el cursor sobre la imagen, Enter para "
+            "agregar un vértice y Retroceso para deshacer el último."
+        )
+        self._key_cursor: Optional[Tuple[float, float]] = None
         self._image: Optional[QImage] = None
         self._offset = (0.0, 0.0)
         self._scale = 1.0
         self.points: List[Tuple[float, float]] = []
         self.existing_zone: Optional[Zone] = None  # zona guardada seleccionada (overlay azul)
+        # Zonas propuestas por el sugeridor automático: se pintan de fondo,
+        # punteadas, hasta que el usuario las acepte o las descarte. No
+        # están guardadas en disco.
+        self.suggested_zones: List[Zone] = []
         # Color del polígono en construcción: cambia según el rol elegido en
         # el combo "Tipo" (producto/personal), para que quede visualmente
         # claro para cuál de los dos se están agregando puntos.
-        self._draw_color = QColor("#D8C61A")
+        self._draw_color = QColor(Colors.ACCENT)
 
     # ------------------------------------------------------------- API --
     def set_frame(self, image: QImage) -> None:
@@ -122,9 +163,62 @@ class ZoneCanvas(QWidget):
         self.existing_zone = None
         self.update()
 
+    def set_suggested_zones(self, zones: List[Zone]) -> None:
+        """Fija las zonas propuestas que se dibujan de fondo (sin guardar)."""
+        self.suggested_zones = list(zones)
+        self.update()
+
     def set_draw_color(self, color: QColor) -> None:
         """Cambia el color de los puntos/línea en construcción (rol de zona)."""
         self._draw_color = color
+        self.update()
+
+    # ------------------------------------------------------- teclado --
+    def keyPressEvent(self, event):
+        """
+        Alternativa completa al ratón para dibujar una zona.
+
+        Flechas mueven el cursor (Shift acelera), Enter fija un vértice,
+        Retroceso deshace el último y Suprimir limpia el polígono.
+        """
+        if self._image is None:
+            super().keyPressEvent(event)
+            return
+
+        if self._key_cursor is None:
+            self._key_cursor = (self._image.width() / 2, self._image.height() / 2)
+
+        step = self.KEY_STEP_FAST if event.modifiers() & Qt.ShiftModifier else self.KEY_STEP
+        x, y = self._key_cursor
+        key = event.key()
+
+        if key == Qt.Key_Left:
+            x -= step
+        elif key == Qt.Key_Right:
+            x += step
+        elif key == Qt.Key_Up:
+            y -= step
+        elif key == Qt.Key_Down:
+            y += step
+        elif key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.points.append((x, y))
+            self.point_added.emit()
+            self.update()
+            return
+        elif key == Qt.Key_Backspace:
+            self.undo_point()
+            return
+        elif key == Qt.Key_Delete:
+            self.clear_points()
+            return
+        else:
+            super().keyPressEvent(event)
+            return
+
+        self._key_cursor = (
+            min(max(x, 0.0), float(self._image.width() - 1)),
+            min(max(y, 0.0), float(self._image.height() - 1)),
+        )
         self.update()
 
     def has_frame(self) -> bool:
@@ -166,10 +260,10 @@ class ZoneCanvas(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#0F0E0A"))
+        painter.fillRect(self.rect(), QColor(Colors.BG_INPUT))
 
         if self._image is None:
-            painter.setPen(QColor("#9A9890"))
+            painter.setPen(QColor(Colors.TEXT_SECONDARY))
             painter.drawText(self.rect(), Qt.AlignCenter, "Carga un video para definir zonas")
             return
 
@@ -182,6 +276,19 @@ class ZoneCanvas(QWidget):
         self._scale = scaled.width() / pixmap.width()
         painter.drawPixmap(offset_x, offset_y, scaled)
 
+        # Overlay: zonas sugeridas (punteadas, al fondo). Se dibujan antes
+        # que todo lo demás para que nunca tapen el polígono en edición.
+        for zone in self.suggested_zones:
+            if len(zone.polygon) < 3:
+                continue
+            pts = [self._image_to_widget(x, y) for (x, y) in zone.polygon]
+            pen = QPen(QColor(suggested_color()), 2)
+            pen.setStyle(Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPolyline(pts + [pts[0]])
+            painter.drawText(pts[0] + QPointF(4, -4), zone.name)
+
         # Overlay: zona ya guardada seleccionada (azul)
         if self.existing_zone is not None and len(self.existing_zone.polygon) >= 3:
             pts = [self._image_to_widget(x, y) for (x, y) in self.existing_zone.polygon]
@@ -191,6 +298,18 @@ class ZoneCanvas(QWidget):
             painter.setPen(Qt.NoPen)
             for p in pts:
                 painter.drawEllipse(p, 3, 3)
+
+        # Cursor de teclado: solo visible cuando el lienzo tiene el foco,
+        # para no ensuciar la imagen cuando se trabaja con el ratón.
+        if self.hasFocus() and self._key_cursor is not None:
+            cursor_point = self._image_to_widget(*self._key_cursor)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(Colors.FOCUS), 2))
+            painter.drawLine(cursor_point.x() - 10, cursor_point.y(),
+                             cursor_point.x() + 10, cursor_point.y())
+            painter.drawLine(cursor_point.x(), cursor_point.y() - 10,
+                             cursor_point.x(), cursor_point.y() + 10)
+            painter.drawEllipse(cursor_point, 6, 6)
 
         # Polígono en construcción — color según el rol de zona seleccionado
         pts = [self._image_to_widget(x, y) for (x, y) in self.points]
@@ -204,15 +323,40 @@ class ZoneCanvas(QWidget):
 
 
 class ZoneEditorTab(QWidget):
-    """Pestaña 2: Dibujo manual de zonas (ROI) sobre el frame de referencia."""
+    """
+    Pestaña 2: zonas (ROI) sobre el frame de referencia, y arranque del análisis.
+
+    Es el centro del flujo de la app: recibe la sesión ya preparada de la
+    pestaña 1 (`load_session`), deja corregir las zonas propuestas, y al
+    terminar el análisis avisa a la pestaña 3 con `analysis_finished`.
+    """
+
+    # Emitida con el video_id cuando el análisis termina de recorrer el
+    # video: es el paso 2 → 3 del flujo (MainWindow salta al dashboard).
+    analysis_finished = Signal(str)
 
     def __init__(self):
         super().__init__()
         self.zone_manager = ZoneManager()
+        # La sesión activa: sabe crear su propia fuente de frames, sea un
+        # archivo o una cámara en directo. Antes aquí solo había una ruta,
+        # y por eso no se podía analizar nada que no fuera un archivo.
+        self._session: Optional[AnalysisSession] = None
         self._current_video_id: Optional[str] = None
         self._current_video_path: Optional[Path] = None
         self._current_video_fps: float = 30.0
+        # Zonas propuestas automáticamente, aún NO guardadas en disco.
+        self._suggested_zones: List[Zone] = []
+        # zone_id provisional de la sugerencia que se está editando en el
+        # lienzo: al guardarla deja de ser propuesta y sale de la lista.
+        self._editing_suggested_id: Optional[str] = None
+        # Almacén de la corrida de análisis actual. Se crea al iniciar el
+        # análisis y se conecta al bus del pipeline: sin esta conexión, todo
+        # lo que el pipeline publica se pierde y el dashboard queda vacío.
+        self._store: Optional[EventStore] = None
+        self._publisher: Optional[InProcessPublisher] = None
         self._debug_worker: Optional[DetectionPipelineWorker] = None
+        self._analysis_total: int = 0
         self._debug_reference_image: Optional[QImage] = None
         self._debug_zones: List[Zone] = []
         # Referencia a la state_machine de la corrida de debug actual: se
@@ -273,19 +417,41 @@ class ZoneEditorTab(QWidget):
         layout.addWidget(self.banner)
 
         self.canvas = ZoneCanvas()
+        self.canvas.point_added.connect(self._refresh_zone_list)
         layout.addWidget(self.canvas, stretch=1)
+
+        # Ayuda de teclado, siempre visible: si la alternativa al ratón no
+        # se anuncia, es como si no existiera.
+        keyboard_hint = QLabel(
+            "Con el lienzo enfocado: flechas mueven el cursor (Shift acelera), "
+            "Enter agrega un vértice, Retroceso deshace."
+        )
+        keyboard_hint.setObjectName("mutedText")
+        keyboard_hint.setWordWrap(True)
+        layout.addWidget(keyboard_hint)
 
         # --- Barra de acciones ---
         actions = QHBoxLayout()
-        self.btn_load = QPushButton("Cargar video")
+        self.btn_load = QPushButton("Cargar &video")
+        self.btn_load.setAccessibleName("Cargar un video para definir zonas")
         self.btn_load.clicked.connect(self._on_load_video)
-        self.btn_undo = QPushButton("Deshacer punto")
+        self.btn_undo = QPushButton("Deshacer &punto")
+        self.btn_undo.setAccessibleName("Deshacer el último vértice")
         self.btn_undo.clicked.connect(self._on_undo)
         self.btn_clear = QPushButton("Limpiar puntos")
+        self.btn_clear.setAccessibleName("Borrar todos los vértices del polígono actual")
         self.btn_clear.clicked.connect(self._on_clear)
-        self.btn_debug = QPushButton(" Ver detección (debug)")
-        self.btn_debug.clicked.connect(self.on_run_debug)
-        self.btn_reset = QPushButton("Reiniciar")
+        self.btn_debug = QPushButton("▶  Iniciar análisis")
+        self.btn_debug.setObjectName("primary")
+        self.btn_debug.setAccessibleName("Iniciar el análisis del video")
+        self.btn_debug.setToolTip(
+            "Corre el pipeline completo sobre el video: detecta personas, "
+            "mide interacciones y permanencia, y guarda todo en la base "
+            "local. Al terminar, pasa al Dashboard de Métricas."
+        )
+        self.btn_debug.clicked.connect(self.on_analysis_button)
+        self.btn_reset = QPushButton("&Reiniciar análisis")
+        self.btn_reset.setAccessibleName("Reiniciar el análisis sobre el mismo video")
         self.btn_reset.setToolTip(
             "Detiene el análisis en curso (si hay uno, sin esperar a que "
             "termine el video) y lo vuelve a correr desde el inicio sobre "
@@ -302,6 +468,20 @@ class ZoneEditorTab(QWidget):
         actions.addWidget(self.btn_reset)
         layout.addLayout(actions)
 
+        # Progreso del análisis. Antes el único indicio de que el pipeline
+        # seguía vivo era el contador de FPS del pie: un video de dos
+        # minutos parecía colgado.
+        self.analysis_progress = QProgressBar()
+        self.analysis_progress.setAccessibleName("Progreso del análisis")
+        self.analysis_progress.setVisible(False)
+        layout.addWidget(self.analysis_progress)
+
+        self.analysis_status = QLabel("")
+        self.analysis_status.setObjectName("mutedText")
+        self.analysis_status.setWordWrap(True)
+        self.analysis_status.setAccessibleName("Estado del análisis")
+        layout.addWidget(self.analysis_status)
+
         return container
 
     def _build_zone_panel(self) -> QWidget:
@@ -315,6 +495,7 @@ class ZoneEditorTab(QWidget):
         layout.addWidget(title)
 
         self.zone_list = QListWidget()
+        self.zone_list.setAccessibleName("Zonas definidas para este video")
         self.zone_list.itemSelectionChanged.connect(self._on_zone_selected)
         layout.addWidget(self.zone_list, stretch=1)
 
@@ -322,13 +503,15 @@ class ZoneEditorTab(QWidget):
         name_row = QHBoxLayout()
         name_row.addWidget(QLabel("Nombre:"))
         self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("Ej: Góndola A1, Pasillo 2, ...")
+        self.name_input.setPlaceholderText("Ej: Góndola A1, Pasillo 2…")
+        self.name_input.setAccessibleName("Nombre de la zona")
         name_row.addWidget(self.name_input, stretch=1)
         layout.addLayout(name_row)
 
         type_row = QHBoxLayout()
         type_row.addWidget(QLabel("Rol de la zona:"))
         self.type_combo = QComboBox()
+        self.type_combo.setAccessibleName("Rol de la zona")
         # Los únicos dos valores que el esquema `Zone.zone_type` acepta hoy:
         # "product" (góndola, dwell time de cliente) y "staff" (personal de
         # la tienda/establecimiento — puntos aparte de los de la góndola,
@@ -352,14 +535,33 @@ class ZoneEditorTab(QWidget):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        # --- Acciones sobre las zonas propuestas automáticamente ---
+        # Solo visibles cuando hay sugerencias pendientes de revisar.
+        suggested_row = QHBoxLayout()
+        self.btn_accept_suggested = QPushButton("Aceptar sugeridas")
+        self.btn_accept_suggested.setToolTip(
+            "Guarda todas las zonas propuestas tal como están. Después se "
+            "pueden seguir editando una por una como cualquier otra zona."
+        )
+        self.btn_accept_suggested.clicked.connect(self._on_accept_suggested)
+        self.btn_discard_suggested = QPushButton("Descartar sugeridas")
+        self.btn_discard_suggested.clicked.connect(self._on_discard_suggested)
+        suggested_row.addWidget(self.btn_accept_suggested)
+        suggested_row.addWidget(self.btn_discard_suggested)
+        layout.addLayout(suggested_row)
+        self._set_suggested_actions_visible(False)
+
         buttons_row = QHBoxLayout()
-        self.btn_delete = QPushButton(" Eliminar zona")
+        self.btn_delete = QPushButton("&Eliminar zona")
+        self.btn_delete.setObjectName("danger")
+        self.btn_delete.setAccessibleName("Eliminar la zona seleccionada")
         self.btn_delete.clicked.connect(self._on_delete_zone)
 
         self.btn_cancel = QPushButton("Cancelar")
         self.btn_cancel.clicked.connect(self._on_clear)
 
-        self.btn_save = QPushButton("Guardar zona")
+        self.btn_save = QPushButton("&Guardar zona")
+        self.btn_save.setAccessibleName("Guardar la zona dibujada")
         self.btn_save.setObjectName("primary")
         self.btn_save.clicked.connect(self._on_save)
 
@@ -369,6 +571,100 @@ class ZoneEditorTab(QWidget):
         layout.addLayout(buttons_row)
 
         return panel
+
+    # ------------------------------------------- entrada desde pestaña 1 --
+    def load_session(self, session: AnalysisSession) -> None:
+        """
+        Carga una sesión ya preparada por la pestaña de carga.
+
+        La sesión trae el frame de referencia y las zonas propuestas, y sabe
+        crear su fuente de frames — sea el video limpio o la cámara en
+        directo. Las zonas llegan como propuesta: se dibujan punteadas y no
+        tocan el disco hasta que el usuario las acepta.
+        """
+        self._stop_debug_worker()
+
+        rgb = cv2.cvtColor(session.reference_frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        image = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+
+        self._session = session
+        self._current_video_id = session.video_id
+        self._current_video_path = session.video_path
+        self._current_video_fps = session.fps or 30.0
+        self._editing_zone_id = None
+
+        self.canvas.set_frame(image)
+        self._debug_reference_image = image
+
+        # Se descartan las sugerencias que coincidan con una zona ya
+        # guardada: si el usuario ya marcó ese estante a mano, volver a
+        # proponerlo solo estorba.
+        saved = self.zone_manager.load_zones(self._current_video_id)
+        self._suggested_zones = list(session.suggested_zones) if not saved else []
+        self.canvas.set_suggested_zones(self._suggested_zones)
+        self._set_suggested_actions_visible(bool(self._suggested_zones))
+
+        self.header.set_source_name(session.title)
+        self._update_analysis_button()
+        self._refresh_zone_list()
+
+        origin = session.describe_origin()
+        if self._suggested_zones:
+            self._log(
+                f"✅ {origin} — {len(self._suggested_zones)} zona(s) sugerida(s) "
+                "(línea punteada). Haz click en una para editarla, o acéptalas todas."
+            )
+        elif saved:
+            self._log(f"✅ {origin} — ya tenía {len(saved)} zona(s) guardada(s).")
+        else:
+            self._log(f"✅ {origin} — dibuja las zonas a mano sobre el frame.")
+
+        if session.is_live:
+            self._set_analysis_status(
+                "Cámara en directo: el análisis corre hasta que lo detengas."
+            )
+
+    def _update_analysis_button(self):
+        """El botón cambia de texto según haya o no un análisis corriendo."""
+        running = self._debug_worker is not None and self._debug_worker.isRunning()
+        if running:
+            self.btn_debug.setText("■  Detener análisis")
+            self.btn_debug.setAccessibleName("Detener el análisis en curso")
+        else:
+            live = self._session is not None and self._session.is_live
+            self.btn_debug.setText("▶  Analizar en vivo" if live else "▶  Iniciar análisis")
+            self.btn_debug.setAccessibleName("Iniciar el análisis")
+
+    def _set_suggested_actions_visible(self, visible: bool) -> None:
+        self.btn_accept_suggested.setVisible(visible)
+        self.btn_discard_suggested.setVisible(visible)
+
+    def _on_accept_suggested(self):
+        """Guarda todas las zonas propuestas, con zone_id definitivo."""
+        if not self._suggested_zones or self._current_video_id is None:
+            return
+        for zone in self._suggested_zones:
+            saved = Zone(
+                zone_id=self._next_zone_id(),
+                video_id=self._current_video_id,
+                name=zone.name,
+                polygon=zone.polygon,
+                zone_type=zone.zone_type,
+            )
+            self.zone_manager.save_zone(saved)
+        self._log(f"✅ {len(self._suggested_zones)} zona(s) sugerida(s) guardadas.")
+        self._clear_suggestions()
+
+    def _on_discard_suggested(self):
+        self._log(" Sugerencias descartadas — dibuja las zonas a mano.")
+        self._clear_suggestions()
+
+    def _clear_suggestions(self):
+        self._suggested_zones = []
+        self.canvas.set_suggested_zones([])
+        self._set_suggested_actions_visible(False)
+        self._refresh_zone_list()
 
     # --------------------------------------------------------- acciones --
     def _on_load_video(self):
@@ -400,6 +696,15 @@ class ZoneEditorTab(QWidget):
             self._current_video_id = normalize_video_id(video_info.path.stem)
             self._current_video_path = video_info.path
             self._current_video_fps = video_info.fps or 30.0
+            self._session = AnalysisSession.from_video(
+                video_id=self._current_video_id,
+                video_path=video_info.path,
+                fps=self._current_video_fps,
+            )
+            self._update_analysis_button()
+            # Carga manual: cualquier sugerencia que hubiera quedado en
+            # pantalla pertenecía al video anterior.
+            self._clear_suggestions()
             self.header.set_source_name(video_info.filename)
             self._refresh_zone_list()
             self._log(f"✅ Frame de referencia cargado: {video_info.filename} "
@@ -415,6 +720,7 @@ class ZoneEditorTab(QWidget):
         self.canvas.clear_points()
         self.name_input.clear()
         self._editing_zone_id = None
+        self._editing_suggested_id = None
         self._refresh_zone_list()
 
     def _on_type_changed(self, _index: int = 0):
@@ -425,7 +731,7 @@ class ZoneEditorTab(QWidget):
         están agregando vértices en este momento.
         """
         zone_type = self.type_combo.currentData()
-        color = ZONE_TYPE_COLOR.get(zone_type, ZONE_TYPE_COLOR["product"])
+        color = zone_type_color(zone_type)
         self.type_color_dot.setStyleSheet(f"background-color:{color}; border-radius:6px;")
 
         if zone_type == "staff":
@@ -477,10 +783,17 @@ class ZoneEditorTab(QWidget):
         self._retiring_workers.append(worker)
         worker.finished.connect(lambda w=worker: self._retiring_workers.remove(w) if w in self._retiring_workers else None)
 
+        # El almacén se cierra ya: lo que alcanzó a escribirse queda
+        # confirmado, y el worker interrumpido no vuelve a tocarlo (sus
+        # señales quedaron desconectadas justo arriba).
+        self._close_store()
+
         self._debug_worker = None
         self._debug_state_machine = None
+        self._end_analysis_ui()
         self.btn_debug.setEnabled(True)
         self.btn_load.setEnabled(True)
+        self._update_analysis_button()
 
     def _on_reset_session(self):
         """
@@ -518,68 +831,163 @@ class ZoneEditorTab(QWidget):
         )
         self.on_run_debug()
 
-    # ------------------------------------------------- debug de detección --
+    # ------------------------------------------------------- análisis --
+    def on_analysis_button(self):
+        """
+        Un solo botón para iniciar y detener.
+
+        En directo esto es imprescindible: el stream no se acaba solo, así
+        que sin una forma explícita de parar no habría manera de llegar a
+        los resultados.
+        """
+        if self._debug_worker is not None and self._debug_worker.isRunning():
+            self.stop_analysis()
+        else:
+            self.on_run_debug()
+
+    def stop_analysis(self):
+        """Detiene el análisis en curso y pasa a los resultados."""
+        video_id = self._current_video_id
+        self._log(" Deteniendo el análisis…")
+        self._set_analysis_status("Deteniendo…")
+        self._stop_debug_worker()
+        self._restore_reference_frame()
+        self._end_analysis_ui()
+
+        summary = self._close_store()
+        self._set_analysis_status(
+            f"Análisis detenido: {summary['events']} interacción(es) medidas."
+        )
+        self._log(
+            f"■ Análisis detenido — {summary['events']} interacción(es), "
+            f"{summary['dwell']} permanencia(s) y {summary['samples']} muestra(s) guardadas."
+        )
+        if video_id:
+            self.analysis_finished.emit(video_id)
+
     def on_run_debug(self):
         """
-        Corre el pipeline sobre el mismo video que está cargado en el
-        lienzo, en un QThread (DetectionPipelineWorker) — no un proceso
-        aparte. El frame anotado (cajas + IDs + pose + zonas + estados)
-        se muestra directamente sobre el lienzo del ROI, reemplazando
-        temporalmente el frame de referencia mientras corre.
+        Corre el pipeline completo sobre el video cargado, en un QThread
+        (`DetectionPipelineWorker`).
+
+        Hace dos cosas a la vez:
+
+        - **Muestra** el frame anotado (cajas + IDs + pose + zonas +
+          estados) sobre el lienzo, reemplazando temporalmente el frame de
+          referencia mientras corre.
+        - **Persiste** lo que el pipeline produce. El `InProcessPublisher`
+          se conecta a un `EventStore`: eventos de interacción, dwell time
+          y muestras de posición quedan en SQLite bajo el `video_id` de
+          esta sesión, que es lo que después lee el Dashboard.
+
+        Se procesa 1 de cada `ANALYSIS_FRAME_STRIDE` frames para que un
+        clip de demo termine en un tiempo razonable en CPU.
         """
-        if self._current_video_path is None:
-            QMessageBox.warning(self, "Sin video", "Carga primero un video con 'Cargar video'.")
+        if self._session is None:
+            QMessageBox.warning(
+                self, "Sin fuente",
+                "Carga un video o conecta una cámara en la pestaña 1 antes de analizar.",
+            )
             return
         if self.canvas.points:
             QMessageBox.warning(
                 self, "Dibujo en curso",
-                "Guarda o descarta ('Limpiar puntos') el polígono actual antes de correr el debug.",
+                "Guarda o descarta ('Limpiar puntos') el polígono actual antes de iniciar el análisis.",
             )
             return
         if self._debug_worker is not None and self._debug_worker.isRunning():
-            QMessageBox.warning(self, "En curso", "Ya hay un debug corriendo, espera a que termine.")
+            QMessageBox.warning(self, "En curso", "Ya hay un análisis corriendo, espera a que termine.")
             return
 
         self._debug_zones = self.zone_manager.load_zones(self._current_video_id)
         if not self._debug_zones:
+            if self._suggested_zones:
+                QMessageBox.warning(
+                    self, "Zonas sin confirmar",
+                    "Hay zonas sugeridas sin guardar. Acéptalas o dibuja las tuyas "
+                    "antes de iniciar el análisis: sin zonas guardadas no se puede "
+                    "medir ninguna interacción.",
+                )
+                return
             self._log(
-                f"⚠️ No hay zonas guardadas para '{self._current_video_id}' — se va a "
-                "mostrar el video sin zonas dibujadas."
+                f"⚠️ No hay zonas guardadas para '{self._current_video_id}' — el análisis "
+                "va a registrar circulación, pero ninguna interacción con góndola."
             )
 
+        # La sesión sabe qué fuente construir: archivo con submuestreo, o
+        # cámara en directo. Esta pestaña ya no distingue entre las dos.
         try:
-            source = VideoFileFrameSource(self._current_video_path)
-        except (FileNotFoundError, IOError) as exc:
-            self._log(f"❌ No se pudo abrir el video: {exc}")
+            source = self._session.create_source(frame_stride=ANALYSIS_FRAME_STRIDE)
+        except (FileNotFoundError, IOError, ValueError) as exc:
+            self._log(f"❌ No se pudo abrir la fuente: {exc}")
+            QMessageBox.warning(self, "Sin señal", str(exc))
             return
 
         tracker = PersonTracker()
         pose_estimator = PoseEstimator()
-        state_machine = InteractionStateMachine(fps=self._current_video_fps)
+        # El stride cambia cuántos frames por segundo ve la máquina de
+        # estados: sus umbrales están en frames, así que el fps efectivo es
+        # el del video dividido por el salto. Sin esto, "1 segundo atascado"
+        # pasaría a ser 3 segundos de video real.
+        stride = 1 if self._session.is_live else ANALYSIS_FRAME_STRIDE
+        effective_fps = max(1.0, self._current_video_fps / stride)
+        state_machine = InteractionStateMachine(fps=effective_fps)
         # Se guarda la referencia para que `_on_debug_frame` pueda leer
         # `state_machine.states` y reproducir el mismo coloreado/etiquetado
         # de HOLDING/REACHING que usa `run_pipeline_debug.py` (sección B).
         self._debug_state_machine = state_machine
+
         publisher = InProcessPublisher()
+        # --- Persistencia: sin esto el bus emite al vacío ---
+        self._publisher = publisher
+        self._store = EventStore()
+        self._store.set_session(self._current_video_id, is_demo=False)
+        connect_store_to_publisher(self._store, publisher)
+
         pipeline = DetectionPipeline(tracker, pose_estimator, self.zone_manager, state_machine, publisher)
 
         # ~10 actualizaciones de imagen por segundo, sin importar el fps
         # real del video — evita saturar la cola de eventos de Qt.
-        frame_every_n = max(1, round(self._current_video_fps / 10))
+        frame_every_n = max(1, round(effective_fps / 10))
 
         self._debug_reference_image = self.canvas._image
 
         self.footer.reset_fps()
+        # Total estimado de frames a procesar, para poder dar un porcentaje
+        # real en vez de una barra indeterminada.
+        # En directo no hay un total conocido: la barra queda indeterminada
+        # y el estado cuenta fotogramas en vez de fingir un porcentaje.
+        self._analysis_total = (
+            0 if self._session.is_live
+            else self._estimate_total_frames(self._current_video_path)
+        )
+        # Rango 0-0 = barra indeterminada, que es lo honesto cuando no se
+        # sabe cuánto falta (cámara en directo o contenedor sin metadatos).
+        self.analysis_progress.setRange(0, self._analysis_total or 0)
+        self.analysis_progress.setValue(0)
+        self.analysis_progress.setVisible(True)
+        self._set_analysis_status("Analizando…")
+
         self._debug_worker = DetectionPipelineWorker(pipeline, source, frame_every_n=frame_every_n)
+        self._debug_worker.progress_updated.connect(self._on_analysis_progress)
         self._debug_worker.frame_processed.connect(self._on_debug_frame)
         self._debug_worker.pipeline_finished.connect(self._on_debug_finished)
         self._debug_worker.pipeline_failed.connect(self._on_debug_failed)
         self._debug_worker.progress_updated.connect(self.footer.note_frame_progress)
 
-        self.btn_debug.setEnabled(False)
         self.btn_load.setEnabled(False)
-        self._log(f" Corriendo debug de detección sobre {self._current_video_path.name} (en el lienzo)...")
+        if self._session.is_live:
+            self._log(
+                f"▶ Analizando en directo desde {self._session.describe_origin()} "
+                f"({len(self._debug_zones)} zona(s)). Pulsa 'Detener análisis' para terminar."
+            )
+        else:
+            self._log(
+                f"▶ Analizando {self._session.title} "
+                f"(1 de cada {ANALYSIS_FRAME_STRIDE} frames, {len(self._debug_zones)} zona(s))..."
+            )
         self._debug_worker.start()
+        self._update_analysis_button()
 
     def _on_debug_frame(self, frame, call_count, tracked_people, pose_results):
         """
@@ -699,23 +1107,115 @@ class ZoneEditorTab(QWidget):
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
         self.canvas.set_frame(qimg)
 
+    def _estimate_total_frames(self, video_path: Path) -> int:
+        """
+        Cuántos frames va a procesar el análisis: los del video divididos
+        por el salto de submuestreo. Devuelve 0 si el contenedor no reporta
+        el total, en cuyo caso la barra queda indeterminada en vez de
+        mentir con un porcentaje inventado.
+        """
+        cap = cv2.VideoCapture(str(video_path))
+        try:
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        finally:
+            cap.release()
+        return max(0, total // ANALYSIS_FRAME_STRIDE)
+
+    def _on_analysis_progress(self, frames_done: int):
+        if self._analysis_total:
+            self.analysis_progress.setValue(min(frames_done, self._analysis_total))
+            pct = 100 * frames_done / self._analysis_total
+            self._set_analysis_status(
+                f"Analizando… {frames_done} de {self._analysis_total} fotogramas ({pct:.0f}%)"
+            )
+        else:
+            live = self._session is not None and self._session.is_live
+            prefix = "Analizando en directo…" if live else "Analizando…"
+            self._set_analysis_status(f"{prefix} {frames_done} fotogramas procesados")
+
+    def _set_analysis_status(self, message: str):
+        """Estado del análisis fuera del log, y anunciable por lector de pantalla."""
+        self.analysis_status.setText(message)
+        self.analysis_status.setAccessibleDescription(message)
+
+    def _end_analysis_ui(self):
+        self.analysis_progress.setVisible(False)
+
+    def _close_store(self) -> dict:
+        """
+        Cierra el almacén de la corrida actual y devuelve su resumen.
+
+        `flush()` (dentro de `close()`) confirma el último lote pendiente:
+        el store hace commit cada N escrituras, así que sin esto los
+        eventos finales del video se quedarían sin escribir.
+        """
+        summary = {"events": 0, "samples": 0, "dwell": 0}
+        if self._store is None:
+            return summary
+
+        # Desconectar el bus ANTES de cerrar la conexión SQLite: si el
+        # pipeline fue interrumpido, su hilo puede seguir vivo un instante
+        # y publicar un evento más — que llegaría a un almacén ya cerrado.
+        if self._publisher is not None:
+            try:
+                self._publisher.event_emitted.disconnect(self._store.on_bus_message)
+            except (TypeError, RuntimeError):
+                pass  # ya estaba desconectado
+            self._publisher = None
+
+        try:
+            self._store.flush()
+            summary = {
+                "events": self._store.count_events(self._current_video_id),
+                "samples": self._store.count_position_samples(self._current_video_id),
+                "dwell": self._store.count_dwell_records(self._current_video_id),
+            }
+            self._store.close()
+        except Exception as exc:  # noqa: BLE001 - no romper la UI por el cierre del almacén
+            self._log(f"⚠️ Problema cerrando el almacén de eventos: {exc}")
+        finally:
+            self._store = None
+        return summary
+
+    def _restore_reference_frame(self):
+        if self._debug_reference_image is not None:
+            self.canvas.set_frame(self._debug_reference_image)
+            self.canvas.set_suggested_zones(self._suggested_zones)
+            self._refresh_zone_list()
+
     def _on_debug_finished(self, total_frames: int):
         self.btn_debug.setEnabled(True)
         self.btn_load.setEnabled(True)
+        self._update_analysis_button()
         self._debug_state_machine = None
-        if self._debug_reference_image is not None:
-            self.canvas.set_frame(self._debug_reference_image)
-            self._refresh_zone_list()
-        self._log(f"✅ Debug terminado — {total_frames} frames procesados.")
+        self._restore_reference_frame()
+        self._end_analysis_ui()
+
+        summary = self._close_store()
+        self._set_analysis_status(
+            f"Análisis terminado: {summary['events']} interacción(es) medidas. "
+            "Pasando al tablero de resultados…"
+        )
+        self._log(
+            f"✅ Análisis terminado — {total_frames} frames procesados, "
+            f"{summary['events']} interacción(es), {summary['dwell']} permanencia(s) "
+            f"y {summary['samples']} muestra(s) de posición guardadas."
+        )
+
+        # Paso 2 → 3: MainWindow salta al dashboard con esta sesión.
+        if self._current_video_id:
+            self.analysis_finished.emit(self._current_video_id)
 
     def _on_debug_failed(self, message: str):
         self.btn_debug.setEnabled(True)
         self.btn_load.setEnabled(True)
+        self._update_analysis_button()
         self._debug_state_machine = None
-        if self._debug_reference_image is not None:
-            self.canvas.set_frame(self._debug_reference_image)
-            self._refresh_zone_list()
-        self._log(f"❌ Falló el debug: {message}")
+        self._restore_reference_frame()
+        self._end_analysis_ui()
+        self._close_store()
+        self._set_analysis_status("El análisis falló. Revisa el historial de mensajes.")
+        self._log(f"❌ Falló el análisis: {message}")
 
     def _on_save(self):
         """Guarda la zona dibujada con el esquema `Zone` vía ZoneManager."""
@@ -743,6 +1243,16 @@ class ZoneEditorTab(QWidget):
         self.zone_manager.save_zone(zone)
         verb = "actualizada" if is_edit else "guardada"
         self._log(f"✅ Zona {verb}: {zone_id} — {name} ({len(polygon)} vértices, tipo={zone_type}) [{self._current_video_id}]")
+
+        # Si lo que se acaba de guardar venía de una sugerencia, esa
+        # propuesta ya está resuelta: sale de la lista de pendientes.
+        if self._editing_suggested_id is not None:
+            self._suggested_zones = [
+                z for z in self._suggested_zones if z.zone_id != self._editing_suggested_id
+            ]
+            self._editing_suggested_id = None
+            self.canvas.set_suggested_zones(self._suggested_zones)
+            self._set_suggested_actions_visible(bool(self._suggested_zones))
 
         self.name_input.clear()
         self.canvas.clear_points()
@@ -784,6 +1294,18 @@ class ZoneEditorTab(QWidget):
                 zone_id=None,  # fila "en vivo": clickearla no debe recargar la versión guardada
             )
 
+        # Sugerencias pendientes: se listan antes que las guardadas, con su
+        # estado explícito, para que nadie las confunda con zonas reales.
+        for zone in self._suggested_zones:
+            self._add_zone_row(
+                name=zone.name,
+                nodes=len(zone.polygon),
+                area_px=_polygon_area_px(zone.polygon),
+                zone_type=zone.zone_type,
+                status="Sugerida (sin guardar)",
+                zone_id=zone.zone_id,
+            )
+
         if self._current_video_id is None:
             return
 
@@ -809,7 +1331,7 @@ class ZoneEditorTab(QWidget):
 
         name_row = QHBoxLayout()
         name_row.setSpacing(6)
-        color = ZONE_TYPE_COLOR.get(zone_type)
+        color = zone_type_color(zone_type) if zone_type in ("product", "staff") else None
         if color:
             dot = QLabel()
             dot.setFixedSize(9, 9)
@@ -879,6 +1401,30 @@ class ZoneEditorTab(QWidget):
         zone_id = items[0].data(Qt.UserRole)
         if zone_id is None:
             return  # es la fila "en construcción/edición", no una zona guardada distinta
+
+        # Una sugerencia se "edita" pasándola al lienzo como polígono en
+        # construcción: al guardarla recibe un zone_id definitivo y deja de
+        # ser una propuesta (por eso _editing_zone_id queda en None).
+        if zone_id.startswith(SUGGESTED_ID_PREFIX):
+            suggested = next((z for z in self._suggested_zones if z.zone_id == zone_id), None)
+            if suggested is None or not self.canvas.has_frame():
+                return
+            self._editing_zone_id = None
+            self._editing_suggested_id = zone_id
+            self.canvas.existing_zone = None
+            self.canvas.points = list(suggested.polygon)
+            self.name_input.setText(suggested.name)
+            type_index = self.type_combo.findData(suggested.zone_type)
+            if type_index >= 0:
+                self.type_combo.setCurrentIndex(type_index)
+            self.canvas.update()
+            QTimer.singleShot(0, self._refresh_zone_list)
+            self._log(
+                f" Editando la sugerencia '{suggested.name}' — ajusta los puntos "
+                "y presiona 'Guardar zona' para confirmarla."
+            )
+            return
+
         zone = self._zones.get(zone_id)
         if not zone or not self.canvas.has_frame():
             return

@@ -11,6 +11,7 @@ se ofrece sembrar una sesión de demostración explícitamente marcada como
 tal (ver `app/core/backend/demo_seed.py`), nunca de forma automática o
 silenciosa.
 """
+import json
 from pathlib import Path
 
 import cv2
@@ -43,11 +44,35 @@ from app.ui.theme import Colors
 from app.ui.widgets.header import HeaderBar, create_heatmap_icon
 from app.utils import config
 
-TAKEN_COLOR = Colors.ACCENT
-RETURNED_COLOR = Colors.INFO_BLUE
-EMPLOYEE_COLOR = Colors.WARNING
+# Los colores de serie salen de la paleta de datos, NO del acento de marca.
+# Antes el mismo amarillo era botón primario, pestaña activa, etiqueta mono
+# y serie "tomado": un color con cinco significados. El par actual está
+# validado para daltonismo (ΔE > 23 en protanopia y deuteranopia) y dentro
+# de la banda de luminosidad de cada tema.
+#
+# Son funciones porque el tema se cambia en caliente: una constante de
+# módulo se quedaría con el color del tema inicial.
+def taken_color() -> str:
+    return Colors.SERIES_TAKEN
+
+
+def returned_color() -> str:
+    return Colors.SERIES_RETURNED
+
+
+def employee_color() -> str:
+    return Colors.WARNING
 
 REFRESH_INTERVAL_MS = 3000
+
+# Texto del combo cuando no hay ninguna sesión: ni zonas dibujadas ni datos.
+NO_SESSION_LABEL = "(sin sesiones)"
+
+
+def _format_seconds(seconds: float) -> str:
+    """Segundos del video como mm:ss — más legible que un decimal suelto."""
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60}:{seconds % 60:02d}"
 
 
 # ============================================================ widgets base --
@@ -92,7 +117,10 @@ class KpiCard(QFrame):
         layout.addWidget(self.label)
 
         self.value_label = QLabel("—")
-        self.value_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-size: 20pt; font-weight: 700;")
+        # objectName en vez de stylesheet en línea: así el tamaño sigue la
+        # escala de fuente del usuario y la fuente monoespaciada mantiene
+        # el ancho de las cifras estable entre refrescos.
+        self.value_label.setObjectName("kpiValue")
         layout.addWidget(self.value_label)
 
         self.note_label = QLabel("")
@@ -103,7 +131,10 @@ class KpiCard(QFrame):
         self.value_label.setText(value)
         self.note_label.setText(note)
         color = note_color or Colors.TEXT_SECONDARY
-        self.note_label.setStyleSheet(f"color: {color}; font-size: 9pt;")
+        self.note_label.setStyleSheet(f"color: {color};")
+        # Nombre accesible completo: un lector de pantalla anuncia
+        # "Interacciones totales: 42", no un "42" suelto.
+        self.setAccessibleName(f"{self.label.text()}: {value}. {note}".strip())
 
 
 class EmptyState(QLabel):
@@ -146,7 +177,7 @@ class ZoneBarChart(QWidget):
         max_total = max((r["taken"] + r["returned"] for r in self._rows), default=1) or 1
         label_w = 170
         bar_x0 = label_w
-        bar_w_max = w - bar_x0 - 60
+        bar_w_max = w - bar_x0 - 200
 
         font_label = QFont("Segoe UI", 9)
         font_mono = QFont("Consolas", 8)
@@ -163,7 +194,7 @@ class ZoneBarChart(QWidget):
             painter.setPen(QColor(Colors.TEXT_MUTED))
             painter.drawText(
                 QRectF(0, y + 22, label_w - 10, 14), Qt.AlignLeft | Qt.AlignVCenter,
-                f"{row['zone_id']} · {total} eventos",
+                f"{total} interacciones",
             )
 
             track_rect = QRectF(bar_x0, y + 8, bar_w_max, 18)
@@ -174,16 +205,24 @@ class ZoneBarChart(QWidget):
             taken_w = bar_w_max * (row["taken"] / max_total)
             returned_w = bar_w_max * (row["returned"] / max_total)
 
-            painter.setBrush(QColor(TAKEN_COLOR))
+            painter.setBrush(QColor(taken_color()))
             painter.drawRoundedRect(QRectF(bar_x0, y + 8, taken_w, 18), 4, 4)
-            painter.setBrush(QColor(RETURNED_COLOR))
+            painter.setBrush(QColor(returned_color()))
             painter.drawRoundedRect(QRectF(bar_x0 + taken_w + 2, y + 8, returned_w, 18), 4, 4)
 
+            # Etiqueta directa sobre la barra: sin eje ni números, una barra
+            # solo comunica "más que la otra", nunca una magnitud. El texto
+            # va en tinta neutra, no en el color de la serie.
             painter.setFont(font_mono)
-            painter.setPen(QColor(Colors.TEXT_SECONDARY))
-            dwell_text = f"{row['avg_dwell_sec']:.1f}s dwell"
+            painter.setPen(QColor(Colors.TEXT_PRIMARY))
             painter.drawText(
-                QRectF(bar_x0 + bar_w_max + 6, y + 8, 54, 18), Qt.AlignLeft | Qt.AlignVCenter, dwell_text
+                QRectF(bar_x0 + bar_w_max + 10, y + 6, 190, 13), Qt.AlignLeft | Qt.AlignVCenter,
+                f"{row['taken']} tomados · {row['returned']} devueltos",
+            )
+            painter.setPen(QColor(Colors.TEXT_SECONDARY))
+            painter.drawText(
+                QRectF(bar_x0 + bar_w_max + 10, y + 21, 190, 13), Qt.AlignLeft | Qt.AlignVCenter,
+                f"{row['avg_dwell_sec']:.1f} s de permanencia",
             )
 
         painter.end()
@@ -210,7 +249,7 @@ class TimelineChart(QWidget):
             painter.end()
             return
 
-        pad_l, pad_r, pad_t, pad_b = 34, 10, 10, 20
+        pad_l, pad_r, pad_t, pad_b = 38, 12, 10, 28
         w, h = self.width(), self.height()
         plot_w = w - pad_l - pad_r
         plot_h = h - pad_t - pad_b
@@ -246,7 +285,7 @@ class TimelineChart(QWidget):
 
         # área bajo "taken"
         fill_points = [xy(i, b["taken"]) for i, b in enumerate(self._bins)]
-        fill_color = QColor(TAKEN_COLOR)
+        fill_color = QColor(taken_color())
         fill_color.setAlpha(40)
         painter.setPen(Qt.NoPen)
         painter.setBrush(fill_color)
@@ -257,8 +296,26 @@ class TimelineChart(QWidget):
         poly.append(QPointF(*xy(0, 0)))
         painter.drawPolygon(poly)
 
-        draw_series("taken", TAKEN_COLOR)
-        draw_series("returned", RETURNED_COLOR, dashed=True)
+        draw_series("taken", taken_color())
+        draw_series("returned", returned_color(), dashed=True)
+
+        # Eje X: sin él la serie no dice a qué momento del video pertenece
+        # cada punto — se veía la forma, pero no se podía ubicar nada.
+        painter.setFont(QFont("Consolas", 7))
+        painter.setPen(QColor(Colors.TEXT_SECONDARY))
+        label_y = h - pad_b + 10
+        for position, rect in (
+            (0, QRectF(pad_l, label_y, 60, 13)),
+            (n // 2, QRectF(pad_l + plot_w / 2 - 30, label_y, 60, 13)),
+            (n - 1, QRectF(w - pad_r - 60, label_y, 60, 13)),
+        ):
+            seconds = self._bins[position].get("bucket_start_sec", 0.0)
+            align = Qt.AlignLeft if position == 0 else (
+                Qt.AlignRight if position == n - 1 else Qt.AlignHCenter)
+            painter.drawText(rect, align | Qt.AlignVCenter, _format_seconds(seconds))
+
+        painter.drawText(QRectF(pad_l, label_y - 13, plot_w, 12), Qt.AlignHCenter,
+                         "minuto del video")
 
         painter.end()
 
@@ -286,6 +343,11 @@ class HeatmapWidget(QWidget):
         self._samples = []
         self._zones: list[Zone] = []
         self._frame_size = FRAME_SIZE
+        # Imagen del heatmap ya calculada. `paintEvent` corre en cada
+        # repintado (redimensionar la ventana, pasar el mouse por encima);
+        # recalcular ahí la cuadrícula de densidad y el colormap sobre miles
+        # de muestras hacía trabajo pesado decenas de veces por segundo.
+        self._heat_image: QImage | None = None
         self.setMinimumHeight(260)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
@@ -293,7 +355,27 @@ class HeatmapWidget(QWidget):
         self._samples = samples
         self._zones = zones
         self._frame_size = frame_size
+        self._heat_image = self._build_heat_image()
         self.update()
+
+    def _build_heat_image(self) -> QImage | None:
+        """Cuadrícula de densidad -> imagen RGBA lista para dibujar."""
+        if not self._samples:
+            return None
+
+        cols, rows = self.GRID_SIZE
+        grid = build_density_grid(self._samples, self._frame_size, grid_size=self.GRID_SIZE, sigma=1.2)
+        peak = float(grid.max()) or 1.0
+        normalized = np.clip((grid / peak) * 255, 0, 255).astype(np.uint8)
+        colored_bgr = cv2.applyColorMap(normalized, cv2.COLORMAP_INFERNO)
+        colored_rgb = cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
+        # Celdas casi vacías se dejan transparentes para no pintar todo
+        # el frame de "azul oscuro" cuando en realidad no hay muestras ahí.
+        alpha = np.where(normalized > 6, 235, 0).astype(np.uint8)
+        rgba = np.ascontiguousarray(np.dstack([colored_rgb, alpha]))
+        # .copy(): QImage no toma posesión del buffer de numpy, y `rgba` es
+        # local — sin la copia la imagen apuntaría a memoria liberada.
+        return QImage(rgba.data, cols, rows, rgba.strides[0], QImage.Format_RGBA8888).copy()
 
     def _draw_area_rect(self) -> QRectF:
         """ROI dibujable dentro del widget, respetando el aspecto del frame."""
@@ -317,19 +399,8 @@ class HeatmapWidget(QWidget):
         painter.setBrush(QColor(Colors.BG_INPUT))
         painter.drawRoundedRect(draw_rect, 6, 6)
 
-        if self._samples:
-            cols, rows = self.GRID_SIZE
-            grid = build_density_grid(self._samples, self._frame_size, grid_size=self.GRID_SIZE, sigma=1.2)
-            peak = float(grid.max()) or 1.0
-            normalized = np.clip((grid / peak) * 255, 0, 255).astype(np.uint8)
-            colored_bgr = cv2.applyColorMap(normalized, cv2.COLORMAP_INFERNO)
-            colored_rgb = cv2.cvtColor(colored_bgr, cv2.COLOR_BGR2RGB)
-            # Celdas casi vacías se dejan transparentes para no pintar todo
-            # el frame de "azul oscuro" cuando en realidad no hay muestras ahí.
-            alpha = np.where(normalized > 6, 235, 0).astype(np.uint8)
-            rgba = np.ascontiguousarray(np.dstack([colored_rgb, alpha]))
-            image = QImage(rgba.data, cols, rows, rgba.strides[0], QImage.Format_RGBA8888)
-            painter.drawImage(draw_rect, image)
+        if self._heat_image is not None:
+            painter.drawImage(draw_rect, self._heat_image)
 
         frame_w, frame_h = self._frame_size
         sx, sy = draw_rect.width() / frame_w, draw_rect.height() / frame_h
@@ -365,7 +436,38 @@ class HeatmapWidget(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(draw_rect, 6, 6)
 
+        self._draw_scale(painter, draw_rect)
         painter.end()
+
+    def _draw_scale(self, painter: QPainter, draw_rect: QRectF) -> None:
+        """
+        Escala de intensidad del mapa de calor.
+
+        Sin ella, un degradado de color no dice nada: el usuario ve manchas
+        brillantes sin saber si significan mucha gente o poca.
+        """
+        if self._heat_image is None:
+            return
+
+        bar_w, bar_h = 120, 8
+        x = draw_rect.right() - bar_w - 12
+        y = draw_rect.bottom() - bar_h - 26
+
+        # Las mismas paradas del colormap INFERNO que usa la cuadrícula.
+        steps = 24
+        ramp = np.linspace(0, 255, steps).astype(np.uint8).reshape(1, steps)
+        colors = cv2.applyColorMap(ramp, cv2.COLORMAP_INFERNO)[0]
+        for i, bgr in enumerate(colors):
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(int(bgr[2]), int(bgr[1]), int(bgr[0])))
+            painter.drawRect(QRectF(x + i * bar_w / steps, y, bar_w / steps + 1, bar_h))
+
+        # Las dos etiquetas van DEBAJO de la barra y dentro del recuadro:
+        # colocadas a los lados se salían del área dibujable y se recortaban.
+        painter.setFont(QFont("Consolas", 7))
+        painter.setPen(QColor(Colors.TEXT_PRIMARY))
+        painter.drawText(QRectF(x, y + bar_h + 2, bar_w, 13), Qt.AlignLeft | Qt.AlignVCenter, "menos")
+        painter.drawText(QRectF(x, y + bar_h + 2, bar_w, 13), Qt.AlignRight | Qt.AlignVCenter, "más gente")
 
 
 # ============================================================ tab principal --
@@ -375,6 +477,7 @@ class DashboardTab(QWidget):
         self.store = EventStore()
         self.zone_manager = ZoneManager()
         self._zone_names: dict[str, str] = {}
+        self._current_zones: list[Zone] = []
 
         self._build_ui()
         self._populate_sessions()
@@ -401,7 +504,7 @@ class DashboardTab(QWidget):
 
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(12, 10, 12, 0)
-        toolbar.addWidget(QLabel("Sesión (video_id):"))
+        toolbar.addWidget(QLabel("Video analizado:"))
         self.session_combo = QComboBox()
         self.session_combo.setMinimumWidth(260)
         self.session_combo.currentIndexChanged.connect(self._on_session_changed)
@@ -420,12 +523,32 @@ class DashboardTab(QWidget):
         self.btn_seed.clicked.connect(self._on_seed_demo)
         toolbar.addWidget(self.btn_seed)
 
+        self.btn_clear_demo = QPushButton("Borrar datos de demo")
+        self.btn_clear_demo.setToolTip(
+            "Elimina únicamente las filas sintéticas de esta sesión. Los "
+            "datos de un análisis real no se tocan."
+        )
+        self.btn_clear_demo.clicked.connect(self._on_clear_demo)
+        toolbar.addWidget(self.btn_clear_demo)
+
         self.btn_refresh = QPushButton("Actualizar")
         self.btn_refresh.setObjectName("primary")
         self.btn_refresh.clicked.connect(self.refresh)
         toolbar.addWidget(self.btn_refresh)
 
         outer.addLayout(toolbar)
+
+        # Aviso permanente de datos sintéticos. Mientras la sesión tenga
+        # filas sembradas, esta banda queda visible: un dashboard que
+        # presenta números de ejemplo sin decirlo es peor que uno vacío.
+        self.demo_banner = QLabel()
+        self.demo_banner.setWordWrap(True)
+        self.demo_banner.setStyleSheet(
+            f"background-color: {Colors.WARNING}; color: #1A1A1A; "
+            f"padding: 6px 12px; font-weight: 700;"
+        )
+        self.demo_banner.setVisible(False)
+        outer.addWidget(self.demo_banner)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -439,10 +562,10 @@ class DashboardTab(QWidget):
         kpi_row = QHBoxLayout()
         kpi_row.setSpacing(10)
         self.kpi_total = KpiCard("INTERACCIONES TOTALES")
-        self.kpi_take_rate = KpiCard("TASA DE TOMA NETA")
-        self.kpi_dwell = KpiCard("DWELL PROMEDIO")
-        self.kpi_employee = KpiCard("PERSONAL DETECTADO (STAFF)")
-        self.kpi_zones = KpiCard("ZONAS ACTIVAS")
+        self.kpi_take_rate = KpiCard("SE LO LLEVARON")
+        self.kpi_dwell = KpiCard("TIEMPO MEDIO FRENTE A LA GÓNDOLA")
+        self.kpi_employee = KpiCard("ACTIVIDAD DE PERSONAL")
+        self.kpi_zones = KpiCard("ZONAS CON ACTIVIDAD")
         for kpi in (self.kpi_total, self.kpi_take_rate, self.kpi_dwell, self.kpi_employee, self.kpi_zones):
             kpi_row.addWidget(kpi)
         content_layout.addLayout(kpi_row)
@@ -453,21 +576,21 @@ class DashboardTab(QWidget):
         grid.setColumnStretch(0, 2)
         grid.setColumnStretch(1, 1)
 
-        timeline_card = Card("Interacciones por bucket de tiempo", "Tomado (línea sólida) vs. devuelto (línea punteada)")
+        timeline_card = Card("Interacciones a lo largo del video", "Tomado (línea sólida) y devuelto (línea punteada)")
         self.timeline_chart = TimelineChart()
-        self.timeline_empty = EmptyState("Sin eventos aún. Corre el pipeline o carga la sesión de demostración.")
+        self.timeline_empty = EmptyState("Todavía no hay interacciones. Inicia el análisis en la pestaña 2 o carga la demostración.")
         timeline_card.body.addWidget(self.timeline_chart)
         timeline_card.body.addWidget(self.timeline_empty)
         grid.addWidget(timeline_card, 0, 0)
 
-        zones_card = Card("Desempeño por zona de producto", "InteractionEvent.action agrupado por zone_id")
+        zones_card = Card("Interacciones por zona de góndola", "Cuántas veces se tomó y se devolvió producto en cada zona")
         self.zone_chart = ZoneBarChart()
-        self.zone_empty = EmptyState("Sin eventos por zona todavía.")
+        self.zone_empty = EmptyState("Todavía no hay interacciones asociadas a ninguna zona.")
         zones_card.body.addWidget(self.zone_chart)
         zones_card.body.addWidget(self.zone_empty)
         grid.addWidget(zones_card, 1, 0)
 
-        recent_card = Card("Eventos recientes", "event_store.db · tabla events")
+        recent_card = Card("Últimas interacciones detectadas", "Las 15 más recientes de esta sesión")
         self.events_table = QTableWidget(0, 4)
         self.events_table.setHorizontalHeaderLabels(["Track", "Zona", "Acción", "t (s)"])
         self.events_table.verticalHeader().setVisible(False)
@@ -483,12 +606,12 @@ class DashboardTab(QWidget):
             "Personal excluido del cálculo · botón de la barra superior para verlo en grande",
         )
         self.heatmap = HeatmapWidget()
-        self.heatmap_empty = EmptyState("Sin muestras de posición aún (PositionSample vacío).")
+        self.heatmap_empty = EmptyState("Todavía no hay recorridos registrados. Inicia el análisis en la pestaña 2.")
         heatmap_card.body.addWidget(self.heatmap)
         heatmap_card.body.addWidget(self.heatmap_empty)
         grid.addWidget(heatmap_card, 0, 1)
 
-        perf_card = Card("Zonas con más movimiento", "Ranking por eventos totales")
+        perf_card = Card("Zonas con más movimiento", "Ordenadas por número de interacciones")
         self.ranking_label = QLabel("")
         self.ranking_label.setWordWrap(True)
         perf_card.body.addWidget(self.ranking_label)
@@ -496,10 +619,10 @@ class DashboardTab(QWidget):
 
         legend_card = Card("Leyenda")
         legend_layout = QVBoxLayout()
-        legend_layout.addWidget(self._legend_row(TAKEN_COLOR, "Tomado (taken)"))
-        legend_layout.addWidget(self._legend_row(RETURNED_COLOR, "Devuelto (returned)"))
-        legend_layout.addWidget(self._legend_row(Colors.INFO_BLUE, "Zona de producto (ROI)"))
-        legend_layout.addWidget(self._legend_row(EMPLOYEE_COLOR, "Zona de personal (ROI)"))
+        legend_layout.addWidget(self._legend_row(taken_color(), "Tomado — el cliente se llevó el producto"))
+        legend_layout.addWidget(self._legend_row(returned_color(), "Devuelto — lo dejó de vuelta en el estante"))
+        legend_layout.addWidget(self._legend_row(Colors.INFO_BLUE, "Zona de góndola"))
+        legend_layout.addWidget(self._legend_row(employee_color(), "Zona de personal (excluida de las métricas)"))
         legend_card.body.addLayout(legend_layout)
         grid.addWidget(legend_card, 2, 1)
 
@@ -527,23 +650,90 @@ class DashboardTab(QWidget):
 
     # --------------------------------------------------------- sesiones --
     def _populate_sessions(self):
+        """
+        Lista las sesiones disponibles: las que tienen zonas dibujadas más
+        las que ya tienen datos en la base (puede haber datos de una sesión
+        cuyas zonas se borraron después).
+        """
         base = Path(config.ZONES_STORAGE_PATH)
-        video_ids = sorted(p.name for p in base.iterdir() if p.is_dir()) if base.exists() else []
+        from_zones = {p.name for p in base.iterdir() if p.is_dir()} if base.exists() else set()
+        from_data = {v for v in self.store.list_sessions() if v}
+        video_ids = sorted(from_zones | from_data)
+
+        current = self.session_combo.currentText() if self.session_combo.count() else ""
         self.session_combo.blockSignals(True)
         self.session_combo.clear()
-        self.session_combo.addItems(video_ids or ["(sin zonas guardadas)"])
+        self.session_combo.addItems(video_ids or [NO_SESSION_LABEL])
+        if current:
+            index = self.session_combo.findText(current)
+            if index >= 0:
+                self.session_combo.setCurrentIndex(index)
         self.session_combo.blockSignals(False)
         self._load_zone_names()
+
+    def show_session(self, video_id: str) -> None:
+        """
+        Selecciona una sesión y refresca. Es el punto de entrada desde la
+        pestaña de zonas cuando termina un análisis (paso 2 → 3).
+        """
+        self._populate_sessions()
+        index = self.session_combo.findText(video_id)
+        if index >= 0:
+            self.session_combo.setCurrentIndex(index)
+        self._load_zone_names()
+        self.refresh()
+
+    @property
+    def current_video_id(self) -> str | None:
+        """
+        `video_id` de la sesión seleccionada, o None si no hay ninguna.
+
+        None significa "no filtrar" para las consultas del almacén: es lo
+        que se usa cuando todavía no hay ninguna sesión con nombre.
+        """
+        text = self.session_combo.currentText()
+        return None if not text or text == NO_SESSION_LABEL else text
 
     def _on_session_changed(self, _index: int):
         self._load_zone_names()
         self.refresh()
 
     def _load_zone_names(self):
-        video_id = self.session_combo.currentText()
+        video_id = self.current_video_id
         zones = self.zone_manager.load_zones(video_id) if video_id else []
         self._zone_names = {z.zone_id: z.name for z in zones}
         self._current_zones = zones
+
+    def _frame_size_for_session(self) -> tuple[int, int]:
+        """
+        Resolución del frame sobre el que se dibujaron las zonas.
+
+        Sale del reporte `.json` que la limpieza deja junto al video
+        (`output_resolution`). Antes estaba fija en 1280x720: con un video
+        4K, las muestras de posición y los polígonos quedaban en escalas
+        distintas y el heatmap aparecía desalineado respecto a las zonas.
+        """
+        video_id = self.current_video_id
+        if not video_id:
+            return FRAME_SIZE
+        report_path = Path(config.PROCESSED_DIR) / f"{video_id}.json"
+        try:
+            with open(report_path, "r", encoding="utf-8") as f:
+                resolution = json.load(f).get("output_resolution")
+            if resolution and len(resolution) == 2 and all(int(v) > 0 for v in resolution):
+                return int(resolution[0]), int(resolution[1])
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass  # sin sidecar legible se cae al default
+        return FRAME_SIZE
+
+    def _on_clear_demo(self):
+        video_id = self.current_video_id
+        deleted = self.store.delete_demo_rows(video_id)
+        self.status_label.setText(
+            f"Datos de demostración eliminados ({deleted} evento(s))."
+            if deleted else "Esta sesión no tenía datos de demostración."
+        )
+        self.refresh()
 
     # ----------------------------------------------------------- acciones --
     def _open_heatmap_dialog(self):
@@ -566,8 +756,11 @@ class DashboardTab(QWidget):
         layout.addWidget(caption)
 
         big_heatmap = HeatmapWidget()
-        zones = getattr(self, "_current_zones", [])
-        big_heatmap.set_data(self.store.get_position_samples(), zones)
+        big_heatmap.set_data(
+            self.store.get_position_samples(video_id=self.current_video_id),
+            self._current_zones,
+            self._frame_size_for_session(),
+        )
         layout.addWidget(big_heatmap, stretch=1)
 
         close_row = QHBoxLayout()
@@ -580,11 +773,11 @@ class DashboardTab(QWidget):
         dialog.exec()
 
     def _on_seed_demo(self):
-        zones = getattr(self, "_current_zones", [])
+        zones = self._current_zones
         if not zones:
             self.status_label.setText("No hay zonas guardadas para esta sesión: crea zonas en la pestaña 2 primero.")
             return
-        inserted = seed_demo_session(self.store, zones)
+        inserted = seed_demo_session(self.store, zones, video_id=self.current_video_id or "")
         self.status_label.setText(f"Sesión de demostración cargada ({inserted} eventos sintéticos).")
         self.refresh()
 
@@ -596,16 +789,35 @@ class DashboardTab(QWidget):
         # refleja en el siguiente tick (<=3s) sin tener que tocar el combo.
         self._load_zone_names()
 
-        summary = self.store.get_summary()
-        zone_rows = self.store.get_zone_breakdown()
-        timeline = self.store.get_timeline(bucket_sec=30.0)
-        recent = self.store.get_recent_events(limit=15)
-        position_samples = self.store.get_position_samples()
+        video_id = self.current_video_id
+        summary = self.store.get_summary(video_id)
+        zone_rows = self.store.get_zone_breakdown(video_id)
+        timeline = self.store.get_timeline(bucket_sec=30.0, video_id=video_id)
+        recent = self.store.get_recent_events(limit=15, video_id=video_id)
+        position_samples = self.store.get_position_samples(video_id=video_id)
 
-        is_demo = not has_data(self.store)
-        self.btn_seed.setEnabled(is_demo)
-        if is_demo and not self.status_label.text():
-            self.status_label.setText("Sin eventos reales todavía — el pipeline de detección aún no publicó nada.")
+        # Sembrar la demo solo tiene sentido mientras no haya datos reales
+        # de esta sesión; el aviso de datos sintéticos se mantiene mientras
+        # queden filas de demo, aunque ya se haya sembrado.
+        has_real = has_data(self.store, video_id)
+        demo_events = self.store.count_demo_events(video_id)
+        self.btn_seed.setEnabled(not has_real and not demo_events)
+        self.btn_clear_demo.setVisible(demo_events > 0)
+
+        if demo_events:
+            self.demo_banner.setText(
+                f"DATOS DE DEMOSTRACIÓN — {demo_events} de los {summary['total_events']} eventos "
+                "de esta sesión son sintéticos, generados para poder ver el tablero antes de "
+                "correr el análisis. No provienen de ningún video."
+            )
+            self.demo_banner.setVisible(True)
+        else:
+            self.demo_banner.setVisible(False)
+
+        if not has_real and not demo_events and not self.status_label.text():
+            self.status_label.setText(
+                "Sin eventos todavía — inicia el análisis en la pestaña 2 o carga la demostración."
+            )
 
         # KPIs
         self.kpi_total.set_value(str(summary["total_events"]))
@@ -633,8 +845,8 @@ class DashboardTab(QWidget):
         self.timeline_empty.setVisible(len(timeline) < 2)
 
         # Heatmap de circulación (PositionSample -> build_density_grid)
-        zones = getattr(self, "_current_zones", [])
-        self.heatmap.set_data(position_samples, zones)
+        zones = self._current_zones
+        self.heatmap.set_data(position_samples, zones, self._frame_size_for_session())
         self.heatmap.setVisible(bool(position_samples))
         self.heatmap_empty.setVisible(not position_samples)
 
@@ -642,7 +854,8 @@ class DashboardTab(QWidget):
         ranked = sorted(zone_rows, key=lambda r: r["taken"] + r["returned"], reverse=True)
         if ranked:
             lines = [
-                f"{i+1}. {r['name']} — {r['taken']+r['returned']} eventos ({r['avg_dwell_sec']:.1f}s dwell)"
+                f"{i+1}. {r['name']} — {r['taken']+r['returned']} interacciones "
+                f"· {r['avg_dwell_sec']:.1f} s de permanencia"
                 for i, r in enumerate(ranked[:5])
             ]
             self.ranking_label.setText("\n".join(lines))
@@ -654,7 +867,7 @@ class DashboardTab(QWidget):
         for i, ev in enumerate(recent):
             zone_name = self._zone_names.get(ev["zone_id"], ev["zone_id"])
             action_item = QTableWidgetItem("● Tomado" if ev["action"] == "taken" else "● Devuelto")
-            action_item.setForeground(QColor(TAKEN_COLOR if ev["action"] == "taken" else RETURNED_COLOR))
+            action_item.setForeground(QColor(taken_color() if ev["action"] == "taken" else returned_color()))
             self.events_table.setItem(i, 0, QTableWidgetItem(f"#{ev['track_id']}"))
             self.events_table.setItem(i, 1, QTableWidgetItem(zone_name))
             self.events_table.setItem(i, 2, action_item)

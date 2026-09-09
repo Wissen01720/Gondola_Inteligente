@@ -18,16 +18,20 @@ computacional (Scapder). Este repositorio cubre, en capas incrementales:
 ## Índice
 
 1. [Qué se construyó (visión general y estructura)](#1-qué-se-construyó-visión-general-y-estructura)
+   - [El flujo de la app: las tres pestañas son un solo camino](#el-flujo-de-la-app-las-tres-pestañas-son-un-solo-camino)
 2. [Cómo correr el proyecto](#2-cómo-correr-el-proyecto)
 3. [Módulo 1 — Carga y Limpieza de Video](#módulo-1--carga-y-limpieza-de-video)
    - [3.1 Qué se construyó (Módulo 1)](#31-qué-se-construyó-módulo-1)
    - [3.2 Cómo limitar duración y peso de los videos cargados](#32-cómo-limitar-duración-y-peso-de-los-videos-cargados)
    - [3.3 Qué contiene el reporte `.json` de cada limpieza](#33-qué-contiene-el-reporte-json-de-cada-limpieza)
+   - [3.4 Cómo se elige el frame de referencia](#34-cómo-se-elige-el-frame-de-referencia)
 4. [Módulo 2 — Pipeline de Detección](#módulo-2--pipeline-de-detección)
    - [4.1 Qué se construyó (Módulo 2)](#41-qué-se-construyó-módulo-2)
    - [4.2 Flujo funcional de este módulo (Módulo 2)](#42-flujo-funcional-de-este-módulo-módulo-2)
    - [4.3 Cómo correr (Módulo 2)](#43-cómo-correr-módulo-2)
    - [4.4 Qué contiene el `Event Object` (Módulo 2)](#44-qué-contiene-el-event-object-módulo-2)
+   - [4.5 Sugerencia automática de zonas (auto-ROI)](#45-sugerencia-automática-de-zonas-auto-roi)
+   - [4.6 Submuestreo del análisis](#46-submuestreo-del-análisis)
 5. [Módulo 3 — Trayectoria, Transporte In-Process y Backend Local](#módulo-3--trayectoria-transporte-in-process-y-backend-local)
    - [5.1 Captura de trayectoria continua (`PositionSample`)](#51-captura-de-trayectoria-continua-positionsample)
    - [5.2 Fuentes de frames: video limpio y cámara en vivo](#52-fuentes-de-frames-video-limpio-y-cámara-en-vivo)
@@ -38,7 +42,10 @@ computacional (Scapder). Este repositorio cubre, en capas incrementales:
    - [6.1 Qué muestra el dashboard](#61-qué-muestra-el-dashboard)
    - [6.2 Por qué el personal no cuenta en el mapa de calor](#62-por-qué-el-personal-no-cuenta-en-el-mapa-de-calor)
    - [6.3 Sesión de demostración](#63-sesión-de-demostración)
+   - [6.4 Sesiones: cada análisis, sus propios números](#64-sesiones-cada-análisis-sus-propios-números)
 7. [Seguridad en la carga de archivos](#7-seguridad-en-la-carga-de-archivos)
+   - [Cámara en vivo](#cámara-en-vivo)
+   - [Experiencia de usuario y accesibilidad](#experiencia-de-usuario-y-accesibilidad)
 8. [Contratos de datos documentados](#8-contratos-de-datos-documentados)
 9. [Privacidad por diseño](#9-privacidad-por-diseño)
 10. [Sugerencias para continuar el desarrollo](#10-sugerencias-para-continuar-el-desarrollo)
@@ -70,10 +77,12 @@ scapder-vision/
 │   │   ├── ingestion/             # Team 1 — cámara/IoT e ingesta de frames
 │   │   │   ├── video_loader.py    #   Carga de video + metadatos + validaciones de seguridad
 │   │   │   ├── video_cleaner.py   #   Limpieza: frames negros/congelados + reencode
-│   │   │   ├── workers.py         #   QThread para que la UI no se congele (limpieza)
+│   │   │   ├── workers.py         #   QThread: limpieza + preparación de sesión (frame + ROI)
+│   │   │   ├── frame_picker.py    #   Elige el mejor frame de referencia (nitidez + menos gente)
 │   │   │   └── frame_source.py    #   FrameSource: video limpio + mapping / cámara en vivo (stub)
 │   │   ├── detection/             # Team 2 — pipeline de detección
 │   │   │   ├── tracker.py         #   Detección + tracking con ByteTrack integrado (YOLOv11, clase 0 COCO)
+│   │   │   ├── roi_suggester.py   #   Propone zonas de góndola sobre el frame de referencia
 │   │   │   ├── pose.py            #   Estimación de pose corporal (17 keypoints)
 │   │   │   ├── zone.py            #   Zonas + señales geométricas (ZoneManager, roles product/staff)
 │   │   │   ├── state_machine.py   #   Máquina de estados IDLE→REACHING→HOLDING→taken/returned
@@ -113,6 +122,39 @@ scapder-vision/
 ├── run.sh / run.bat
 └── README.md
 ```
+
+### El flujo de la app: las tres pestañas son un solo camino
+
+Las pestañas ya no son tres pantallas sueltas que había que alimentar a
+mano una por una. Están encadenadas:
+
+```
+  Pestaña 1                     Pestaña 2                    Pestaña 3
+  Carga y limpieza    ──────►   Zonas (ROI)      ──────►     Dashboard
+                    session_ready              analysis_finished
+```
+
+1. **Cargar y limpiar** el video en la pestaña 1 (igual que antes).
+2. Al terminar la limpieza, la app **elige sola un frame de referencia
+   bueno** — nítido y con la góndola lo más despejada posible, en vez del
+   arbitrario "frame al 10%" — y **propone zonas de góndola** sobre él.
+3. Salta a la pestaña 2 con ese frame y esas zonas ya cargadas. El
+   usuario las corrige, las acepta o dibuja las suyas, y presiona
+   **"Iniciar análisis"**.
+4. El pipeline recorre el video y **guarda todo en SQLite** bajo el
+   `video_id` de esa sesión.
+5. Al terminar, la app salta al **Dashboard**, ya posicionado en la
+   sesión que se acaba de analizar.
+
+Cada pestaña sigue siendo usable por su cuenta (se puede cargar un video
+directamente en la 2 con "Cargar video", o abrir el dashboard sin haber
+analizado nada), pero el camino natural ya no obliga a volver a buscar el
+mismo archivo en cada pantalla.
+
+Las pestañas **no se conocen entre sí**: se comunican por dos señales Qt
+(`VideoIngestTab.session_ready` y `ZoneEditorTab.analysis_finished`) que
+`MainWindow` conecta. Agregar una pestaña intermedia no obliga a tocar las
+existentes.
 
 ### Flujo funcional de este módulo (Módulo 1)
 
@@ -201,29 +243,42 @@ Cualquiera de los dos scripts:
   - Click en un video de la lista → ver metadatos + miniatura a la derecha.
   - Botones _"Limpiar sel."_ / _"Limpiar todos"_ → procesa en segundo
     plano; el resultado queda en `data/processed/`.
+  - **Al terminar la limpieza** la app prepara la sesión sola (elige el
+    frame de referencia, propone zonas) y **salta a la pestaña 2**. No hay
+    que volver a buscar el archivo.
 - Pestaña _"2. Edición de Zonas (ROI)"_:
-  - Botón _"Cargar video"_ → extrae el frame de referencia sobre el que
-    se dibuja.
+  - Las **zonas propuestas** llegan dibujadas con línea punteada y en
+    verde agua. **No están guardadas**: aparecen en la lista como
+    _"Sugerida (sin guardar)"_ hasta que se decida qué hacer con ellas.
+    - _"Aceptar sugeridas"_ → las guarda todas tal cual.
+    - Click en una → pasa al lienzo como polígono editable; se ajusta y
+      "Guardar zona" la confirma.
+    - _"Descartar sugeridas"_ → las borra de la pantalla y se dibuja a mano.
+  - Botón _"Cargar video"_ → sigue existiendo para trabajar sobre un video
+    cualquiera sin pasar por la pestaña 1.
   - **Rol de la zona**: combo con dos opciones — _"Góndola / producto"_
     (azul) o _"Personal de la tienda"_ (ámbar) — cada click sobre el
     frame agrega un vértice del color del rol activo.
   - Clic en una zona ya guardada de la lista **la carga para editarla**:
     modifica sus puntos y "Guardar zona" sobreescribe el mismo archivo
     (no crea uno duplicado).
-  - Botón _"Ver detección (debug)"_ → corre el pipeline real sobre el
-    video cargado y anota cajas/keypoints/estado directamente sobre el
-    lienzo.
+  - Botón _"▶ Iniciar análisis"_ → corre el pipeline completo sobre el
+    video: anota cajas/keypoints/estado sobre el lienzo **y guarda los
+    eventos, permanencias y muestras de posición en la base local**. Al
+    terminar salta al Dashboard con esa sesión.
   - Botón _"Reiniciar"_ → interrumpe el análisis en curso (sin esperar a
     que el video termine) y lo vuelve a correr desde el inicio **sobre el
     mismo video**, sin pedir cargar uno nuevo.
 - Pestaña _"3. Dashboard de Métricas"_ (ver [Módulo 4](#módulo-4--dashboard-de-métricas)):
   - Selector de sesión (`video_id`) + KPIs, timeline, ranking de zonas,
     mapa de calor y feed de eventos recientes, todo leído en vivo desde
-    `EventStore` (auto-refresco cada 3s).
+    `EventStore` (auto-refresco cada 3s) **y acotado a la sesión elegida**.
   - Botón de la barra superior → abre el mapa de calor a tamaño completo.
   - Botón _"Cargar sesión de demostración"_ → siembra datos sintéticos
-    explícitamente marcados como demo, solo si la sesión aún no tiene
-    eventos reales.
+    marcados como demo, solo si la sesión aún no tiene eventos reales.
+  - Si la sesión tiene datos sembrados, una **banda ámbar permanente** lo
+    dice, y el botón _"Borrar datos de demo"_ los elimina sin tocar los
+    reales.
 
 ---
 
@@ -307,6 +362,34 @@ Cada vez que se limpia un video, junto al video de salida en
   simplemente queda 1 a 1 (`clean_frame` == `original_frame` en cada
   fila) — se genera igual, por consistencia entre todos los videos
   procesados.
+
+## 3.4 Cómo se elige el frame de referencia
+
+El frame sobre el que se dibujan las zonas era siempre el que estuviera al
+10% de la duración. Ese frame es arbitrario: puede estar movido, mal
+iluminado, o con tres personas tapando justamente la góndola que se quiere
+marcar.
+
+`app/core/ingestion/frame_picker.py` muestrea 12 frames repartidos entre
+el 5% y el 95% del video limpio (los extremos suelen traer fundidos y
+ajustes de exposición) y puntúa cada candidato por dos criterios:
+
+- **Nitidez** — varianza del Laplaciano. Un frame movido tiene los bordes
+  suavizados y por lo tanto varianza baja. No es un criterio estético: los
+  bordes son exactamente lo que después usa el sugeridor de ROI para
+  encontrar los estantes.
+- **Ocupación** — cuánta gente hay delante, contada con el mismo YOLO del
+  pipeline. Cada persona detectada penaliza el score, así que entre dos
+  frames de nitidez parecida gana el que tenga la góndola despejada.
+
+La nitidez se normaliza **dentro del propio video**: su escala absoluta
+depende de la cámara, la resolución y la compresión, así que un umbral
+fijo no serviría entre videos distintos.
+
+El detector se inyecta como parámetro en vez de importarse, así que el
+módulo no arrastra `ultralytics` y se puede probar sin modelos. Si el
+detector no está disponible, la elección se hace solo por nitidez en vez
+de fallar.
 
 ---
 
@@ -504,6 +587,59 @@ Ejemplo de un archivo de log generado en `data/events/`:
 ]
 ```
 
+## 4.5 Sugerencia automática de zonas (auto-ROI)
+
+YOLO-COCO no tiene una clase "estantería", así que no hay un detector
+directo que resuelva esto. `app/core/detection/roi_suggester.py` combina
+dos señales que se refuerzan entre sí:
+
+1. **Estructura** (`boxes_from_edges`) — una góndola es una caja
+   rectangular con baldas horizontales muy marcadas. Canny saca los
+   bordes (con umbrales derivados de la mediana del frame, para que
+   funcione igual en una cámara oscura y en una bien iluminada), una
+   dilatación con kernel ancho y bajo (25x3) une los bordes de cada balda
+   en una banda continua sin pegar entre sí dos góndolas apiladas, y los
+   contornos de esas bandas dan rectángulos candidatos.
+2. **Contenido** (`boxes_from_products`) — donde hay producto hay góndola.
+   Las clases COCO que el YOLO ya cargado sí detecta y que en una tienda
+   son producto de estante (botellas, tazas, cuencos, libros, floreros) se
+   agrupan por cercanía: cada caja se expande un margen y las expandidas
+   que se tocan quedan en el mismo grupo. Es clustering espacial sin tener
+   que elegir un número de clusters de antemano.
+
+Los candidatos se fusionan por solapamiento (`merge_boxes` une en su
+**unión**, no descarta el más débil: dos baldas de la misma góndola deben
+terminar en una zona que cubra ambas) y se filtran por tamaño y forma:
+demasiado chico es ruido de bordes, demasiado grande es la pared entera, y
+demasiado alto y angosto es una columna. Los umbrales están en `config.py`
+(`ROI_SUGGEST_*`).
+
+**Son sugerencias, no zonas guardadas.** El módulo no escribe nada en
+disco: la pestaña 2 las muestra punteadas para que el usuario las corrija,
+acepte o descarte. Un heurístico de visión clásica sobre CCTV se equivoca
+a menudo, y ensuciar `data/zones/` con polígonos que nadie revisó sería
+peor que no sugerir nada.
+
+Si el detector de producto no está disponible o falla, la sugerencia sale
+igual usando solo la estructura de bordes.
+
+## 4.6 Submuestreo del análisis
+
+El análisis lanzado desde la UI procesa 1 de cada `ANALYSIS_FRAME_STRIDE`
+frames (3 por defecto, en `config.py`). Los frames intermedios se saltan
+con `cap.grab()` — se avanza el decodificador sin decodificar la imagen,
+que es lo caro — pero **el contador de frames sigue avanzando de uno en
+uno**, así que el `frame_mapping` y con él el timestamp del video original
+siguen siendo exactos.
+
+Los umbrales de la máquina de estados están expresados en frames, así que
+el `fps` que recibe se divide por el salto. Sin ese ajuste, "1 segundo
+atascado en REACHING" pasaría a significar 3 segundos de video real.
+
+Subir `ANALYSIS_FRAME_STRIDE` a 1 procesa todos los frames: máxima
+fidelidad de la máquina de estados y del dwell time, bastante más lento en
+CPU sin GPU.
+
 ---
 
 # Módulo 3 — Trayectoria, Transporte In-Process y Backend Local
@@ -658,13 +794,188 @@ de cliente — el dato quedaría sesgado. Por eso:
 
 ## 6.3 Sesión de demostración
 
-Mientras las pestañas de detección en vivo terminan de integrarse a la
-UI, el botón _"Cargar sesión de demostración"_ siembra (`demo_seed.py`)
+El botón _"Cargar sesión de demostración"_ siembra (`demo_seed.py`)
 eventos, dwell records y trayectorias sintéticas — usando las zonas
-**reales** ya guardadas para esa sesión — solo si `EventStore` todavía no
-tiene eventos reales. Nunca se activa solo ni reemplaza datos reales: es
-explícito, está marcado en la interfaz, y deja de tener efecto en cuanto
-el pipeline publica su primer evento real.
+**reales** ya guardadas para esa sesión — para poder enseñar el tablero
+antes de haber corrido ningún análisis. Solo está disponible si la sesión
+no tiene todavía eventos de un análisis real.
+
+Todo lo que se siembra queda marcado con `is_demo = 1` en la base, y eso
+cambia dos cosas frente a la versión anterior:
+
+- Mientras haya filas sembradas, el dashboard muestra una **banda ámbar
+  permanente** que dice cuántos de los eventos mostrados son sintéticos.
+  Antes, sembrar la demo hacía desaparecer el aviso y los números pasaban
+  a presentarse como si vinieran de un video — que es exactamente lo que
+  no puede pasar delante de un evaluador.
+- El botón _"Borrar datos de demo"_ elimina **solo** esas filas. Los datos
+  de un análisis real conviven en la misma base sin que la demo los toque.
+
+## 6.4 Sesiones: cada análisis, sus propios números
+
+Las tres tablas (`events`, `position_samples`, `dwell_records`) guardan el
+`video_id` de la corrida que las generó, y todas las consultas agregadas
+lo aceptan como filtro. El selector "Sesión" del dashboard filtra de
+verdad: KPIs, timeline, ranking, tabla de eventos y mapa de calor
+corresponden al video seleccionado.
+
+Antes, ese selector solo cambiaba qué polígonos se dibujaban encima del
+heatmap: los totales sumaban todos los videos analizados alguna vez, en
+un mismo número.
+
+Detalles de implementación que importan al correrlo:
+
+- **Migración automática**: una base creada por la versión anterior gana
+  las columnas nuevas con `ALTER TABLE` al abrirla, sin perder filas. Las
+  antiguas quedan con `video_id` vacío.
+- **Escritura por lotes**: `EventStore` hace commit cada 50 escrituras en
+  vez de una por fila. El pipeline publica una `PositionSample` por
+  persona y por frame; con commit por fila, el disco se volvía el cuello
+  de botella del análisis. `flush()` cierra el lote pendiente al terminar.
+- **Modo WAL**: el dashboard lee la misma base que el análisis está
+  escribiendo. Sin WAL, cada escritura bloqueaba a los lectores.
+- **Índices** sobre `(video_id, timestamp)` y `(video_id, zone_id)`: el
+  dashboard refresca cada 3 segundos y antes hacía un scan completo.
+- **Resolución del frame**: el mapa de calor lee `output_resolution` del
+  reporte `.json` de la limpieza en vez de asumir 1280x720 — con un video
+  4K, las muestras y los polígonos quedaban en escalas distintas y el
+  heatmap aparecía desalineado respecto a las zonas.
+
+---
+
+## Cámara en vivo
+
+La aplicación analiza tanto un video ya limpiado como una **cámara en
+directo**: webcam local, cámara IP por RTSP, o MJPEG por HTTP (que es lo
+que sirven las apps que convierten un móvil en cámara IP).
+
+En la pestaña 1, con la fuente en **IP CAMERA**, el campo acepta una
+dirección (`rtsp://…`, `http://…`) o el número de una webcam local — `0`
+es la integrada. Al conectar, la aplicación captura un frame de
+referencia, propone zonas sobre él y salta a la pestaña 2, igual que con
+un archivo.
+
+### Qué cambia respecto a un archivo
+
+| | Archivo | Cámara en vivo |
+|---|---|---|
+| Timestamp | Segundo del video **original**, vía `frame_mapping` | Segundos desde que se conectó (reloj monótono) |
+| Fin | El video se acaba | No termina: hay que **detenerlo** |
+| Progreso | Porcentaje real | Barra indeterminada + fotogramas procesados |
+| Submuestreo | 1 de cada `ANALYSIS_FRAME_STRIDE` | No aplica: el búfer está en 1 y cada lectura da el frame más reciente |
+
+El botón de análisis de la pestaña 2 alterna entre **Analizar en vivo** y
+**Detener análisis**. Sin esa parada explícita no habría forma de llegar
+a los resultados: el stream no se acaba solo.
+
+**Se pierde la trazabilidad al original.** Es la contrapartida honesta de
+analizar en directo: no existe una grabación a la que volver, así que los
+eventos quedan referidos al reloj de la sesión y no a un minuto concreto
+de un archivo. Conviene decirlo al enseñarlo, porque la trazabilidad es
+uno de los puntos fuertes del modo con archivo.
+
+### Detalles que hacen que funcione en la práctica
+
+- **RTSP sobre TCP.** Por UDP, que es el default, el Wi-Fi pierde
+  paquetes y la imagen llega troceada o no llega.
+- **Búfer de captura en 1.** OpenCV acumula frames mientras el pipeline
+  procesa; sin bajarlo, el análisis se va quedando cada vez más atrás del
+  tiempo real.
+- **Una lectura fallida no corta la sesión.** Una cámara por Wi-Fi falla
+  frames sueltos y sigue viva: se reintenta ~2 segundos antes de dar el
+  stream por muerto.
+- **El frame de referencia descarta los primeros cuadros.** Una webcam
+  entrega los primeros con la exposición todavía ajustándose, y un frame
+  oscuro es el peor punto de partida para dibujar zonas.
+- **FPS con red de seguridad.** Muchas cámaras RTSP reportan 0 fps;
+  propagarlo rompería la máquina de estados, cuyos umbrales están en
+  frames.
+
+### El aislamiento de red es el problema número uno
+
+En una red universitaria o de oficina, el **aislamiento de clientes**
+suele estar activo y bloquea el tráfico entre dispositivos conectados al
+mismo Wi-Fi, así que el PC no ve al móvil por más que ambos estén
+"conectados". La solución que siempre funciona: activar el **punto de
+acceso del móvil** y conectar el portátil a él. Conviene comprobar el
+stream en VLC antes de tocar la aplicación: si ahí se ve, el problema
+nunca va a ser de red.
+
+---
+
+## Experiencia de usuario y accesibilidad
+
+La interfaz se auditó midiendo, no a ojo: se calcularon las razones de
+contraste WCAG de cada par de colores y se pasaron los colores de serie
+del dashboard por un validador de paletas para daltonismo.
+
+### Tour guiado
+
+Al primer arranque se abre solo un recorrido de nueve pasos
+(`app/ui/tour.py`). No es un diálogo con texto: oscurece la ventana y
+**recorta un hueco iluminado sobre el elemento del que habla**, así que
+enseña la interfaz real. Se repite cuando se quiera desde el botón **?**
+de la esquina superior derecha o con **F1**, se navega con flechas y se
+sale con Escape. Que ya se vio queda guardado en las preferencias del
+usuario, no en el repositorio.
+
+### Tres temas, todos validados
+
+Desde el botón de accesibilidad (esquina superior derecha):
+
+| Tema | Para qué | Texto principal |
+|---|---|---|
+| Oscuro | Interiores con poca luz | 16.3:1 |
+| Claro | Salas iluminadas y proyección | 15.7:1 |
+| Alto contraste | Baja visión (objetivo AAA) | 21:1 |
+
+El tamaño de letra se ajusta en cuatro pasos (90% a 150%) y **los
+controles crecen con ella**: si solo creciera el texto, el área en la que
+se puede hacer click se quedaría igual de pequeña. Tema y tamaño se
+aplican en vivo, sin reiniciar, y persisten entre sesiones vía
+`QSettings` (`app/utils/settings.py`).
+
+`scripts/check_theme_contrast.py` imprime la tabla completa de contrastes
+y `tests/test_theme.py` **falla** si alguien baja un color por debajo de
+su mínimo. Si al tocar un color el test se pone rojo, el color está mal.
+
+### Lo que se corrigió
+
+- **Recuadros sueltos alrededor de cada etiqueta.** Qt propaga el borde de
+  un panel a sus hijos: cada título y cada campo aparecía dentro de su
+  propia caja. Una regla de la hoja de estilos lo elimina.
+- **No había indicador de foco.** La hoja de estilos anulaba el nativo sin
+  poner otro, así que navegar con Tab era imposible de seguir (WCAG 2.4.7).
+- **Contrastes por debajo de AA**: el texto atenuado estaba en 2.6:1, los
+  bordes de panel en 1.3:1 (de ahí que todo se viera como una masa oscura)
+  y los errores en 4.4:1.
+- **El lienzo de zonas era solo de ratón.** Ahora las flechas mueven un
+  cursor, Enter fija un vértice y Retroceso deshace.
+- **Botones de solo ícono sin nombre accesible**, invisibles para un lector
+  de pantalla.
+- **La pantalla de inicio empezaba en la única función que no existe**:
+  arrancaba en "IP CAMERA" con "CONNECT STREAM" como botón principal,
+  mientras la limpieza de video quedaba en dos botones pequeños y grises.
+- **Los metadatos del video se calculaban y no se mostraban nunca**: el
+  widget existía pero no estaba en ningún layout.
+- **El análisis no daba señales de vida.** Ahora hay barra de progreso con
+  "fotograma X de Y".
+- **Jerga técnica en la interfaz**: "PositionSample vacío",
+  "InteractionEvent.action agrupado por zone_id", "Sesión (video_id)".
+
+### Gráficos
+
+El amarillo de marca significaba cinco cosas a la vez (botón primario,
+pestaña activa, etiqueta del sistema, serie "tomado" y color de dibujo del
+ROI). Las series se movieron a su propio par de colores, validado: la
+separación entre ambos supera ΔE 23 en protanopia y deuteranopia, y cada
+uno mantiene más de 5:1 contra el fondo de la tarjeta.
+
+Además: las barras llevan etiquetas con los valores (sin eje ni números,
+una barra solo dice "más que la otra"), la serie temporal tiene eje de
+tiempo en minutos del video, el mapa de calor tiene escala de intensidad,
+y las cifras de los KPI usan una fuente de ancho fijo para no bailar en
+cada refresco.
 
 ---
 
@@ -753,13 +1064,29 @@ reescribir lo ya construido.
 
 ### Corto plazo (siguiente iteración)
 
-- **Conectar el pipeline en vivo al Dashboard**: hoy la pestaña 3 lee
-  `EventStore` correctamente y el pipeline ya publica ahí en producción,
-  pero todavía no hay una pestaña de "Detección en vivo" que dispare una
-  corrida completa (no solo el debug de la pestaña 2) desde la UI
-  principal — es la pieza que cierra el flujo de punta a punta sin pasar
-  por el botón de debug.
-- **Implementar la cámara en vivo (Team 1)**: reemplazar el stub
+- ~~**Conectar el pipeline al Dashboard**~~ — **hecho**. El botón
+  "Iniciar análisis" de la pestaña 2 conecta el `InProcessPublisher` a un
+  `EventStore` (`connect_store_to_publisher`) y al terminar salta al
+  dashboard. Antes ese publisher no tenía ningún slot conectado: todo lo
+  que producía el pipeline se descartaba y el dashboard solo podía mostrar
+  datos sembrados.
+- ~~**Filtrar el dashboard por sesión**~~ — **hecho**, ver
+  [6.4](#64-sesiones-cada-análisis-sus-propios-números).
+- ~~**"ROI Auto-Suggest"**~~ — **hecho** (primera versión heurística), ver
+  [4.5](#45-sugerencia-automática-de-zonas-auto-roi). Mejorable con un
+  modelo entrenado o de vocabulario abierto.
+- **Normalizar los finales de línea del repo**: el árbol de trabajo está
+  en CRLF y el índice en LF, con `core.autocrlf` sin configurar, así que
+  `git status` marca los ~66 archivos como modificados (mismo número de
+  líneas insertadas que borradas). Conviene arreglarlo con
+  `* text=auto eol=lf` en `.gitattributes` + `git add --renormalize .`
+  **cuando todas las ramas estén integradas**: el commit toca el repo
+  entero y volvería conflictivo cualquier merge pendiente.
+- ~~**Implementar la cámara en vivo**~~ — **hecho**. `LiveFrameSource`
+  acepta webcam local, RTSP y MJPEG por HTTP; ver
+  [Cámara en vivo](#cámara-en-vivo). Lo que sigue pendiente es la
+  reconexión automática si la cámara se cae durante un análisis largo.
+- **(Obsoleto) Implementar la cámara en vivo (Team 1)**: reemplazar el stub
   `LiveFrameSource` por `cv2.VideoCapture` de webcam/RTSP con timestamps
   wall-clock — el resto del pipeline no cambia.
 - **Distinción real pick-up vs put-back**: hoy la máquina de estados
@@ -785,11 +1112,13 @@ reescribir lo ya construido.
   y los eventos ya viven en SQLite. Lo que sigue pendiente es un
   **registro histórico consolidado** por sesión (qué video, cuándo, con
   qué configuración de `config.py`), para auditar y comparar corridas.
-- **"ROI Auto-Suggest" automático**: en lugar de dibujar cada zona a mano,
-  se podría entrenar un modelo ligero para detectar estantes
-  automáticamente en un frame de referencia y sugerir los polígonos. La
-  herramienta manual ya existe (pestaña 2, con edición in-place); esto
-  sería una mejora sobre ella.
+- **Mejorar el auto-ROI con un modelo**: la versión actual
+  ([4.5](#45-sugerencia-automática-de-zonas-auto-roi)) es un heurístico de
+  visión clásica reforzado con clases COCO de producto. Un modelo de
+  vocabulario abierto (YOLO-World con el prompt "shelf") o uno ligero
+  entrenado con anotaciones propias daría sugerencias bastante mejores; se
+  dejó fuera del MVP por la dependencia pesada y la descarga de pesos, que
+  van en contra del criterio de viabilidad edge.
 - **Filtro de personal configurable en la UI**: el Dashboard ya soporta
   `exclude_employees=False` a nivel de `EventStore`; falta exponer un
   toggle visual para alternarlo sin editar código, útil para un análisis
@@ -822,9 +1151,12 @@ reescribir lo ya construido.
 4. Dashboard de heatmap + KPIs + eventos (primer valor demostrable con
    datos reales) — **hecho** (Módulo 4).
 5. Seguridad en la carga de archivos — **hecho** (sección 7).
-6. Eventos de interacción pick-up vs put-back con certeza (más allá del
+6. Flujo encadenado carga → zonas → análisis → dashboard, con frame de
+   referencia y ROI automáticas — **hecho**
+   ([sección 1](#el-flujo-de-la-app-las-tres-pestañas-son-un-solo-camino),
+   [4.5](#45-sugerencia-automática-de-zonas-auto-roi)).
+7. Eventos de interacción pick-up vs put-back con certeza (más allá del
    heurístico de alternancia actual).
-7. Conectar una corrida completa del pipeline (no solo debug) desde la UI
-   principal, y cámara en vivo.
-8. Motor de recomendación basado en reglas.
-9. Optimización edge (OpenVINO) como paso final de "productización".
+8. Cámara en vivo (webcam/RTSP) sobre la `FrameSource` ya existente.
+9. Motor de recomendación basado en reglas.
+10. Optimización edge (OpenVINO) como paso final de "productización".
