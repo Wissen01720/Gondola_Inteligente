@@ -19,6 +19,7 @@ from PySide6.QtCore import QPointF, Qt, QTimer, QRectF
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -39,7 +40,7 @@ from app.core.backend.heatmap import build_density_grid
 from app.core.detection.schemas import Zone
 from app.core.detection.zone import ZoneManager
 from app.ui.theme import Colors
-from app.ui.widgets.header import HeaderBar
+from app.ui.widgets.header import HeaderBar, create_heatmap_icon
 from app.utils import config
 
 TAKEN_COLOR = Colors.ACCENT
@@ -344,9 +345,16 @@ class HeatmapWidget(QWidget):
                 sum(p[0] for p in zone.polygon) / len(zone.polygon),
                 sum(p[1] for p in zone.polygon) / len(zone.polygon),
             ))
+            # Las zonas 'staff' son un ROI de rastreo de personal (para
+            # excluirlo de las métricas de cliente vía StaffZoneTracker),
+            # no una persona detectada — el nombre que le haya puesto quien
+            # las dibujó (ej. "Persona 1") es solo una etiqueta de esa zona,
+            # así que aquí se muestra genérico para no dar a entender que
+            # el heatmap está identificando individuos.
+            label = "Zona de personal" if is_staff else zone.name
             painter.setFont(QFont("Consolas", 7))
             painter.setPen(QColor(Colors.TEXT_PRIMARY))
-            painter.drawText(centroid, zone.name)
+            painter.drawText(centroid, label)
 
         painter.setPen(QPen(QColor(Colors.BORDER), 1))
         painter.setBrush(Qt.NoBrush)
@@ -378,6 +386,12 @@ class DashboardTab(QWidget):
         outer.setSpacing(0)
 
         self.header = HeaderBar("DASHBOARD_METRICAS")
+        # El engranaje de HeaderBar no tenía ninguna acción de "Configuración"
+        # real en esta pestaña; se reutiliza como acceso directo al mapa de
+        # calor en grande (el widget embebido más abajo es chico y comparte
+        # espacio con el ranking de zonas).
+        self.header.set_action(create_heatmap_icon(), "Ver mapa de calor en grande")
+        self.header.settings_clicked.connect(self._open_heatmap_dialog)
         outer.addWidget(self.header)
 
         toolbar = QHBoxLayout()
@@ -459,7 +473,10 @@ class DashboardTab(QWidget):
         recent_card.body.addWidget(self.events_table)
         grid.addWidget(recent_card, 2, 0)
 
-        heatmap_card = Card("Mapa de calor de circulación", "PositionSample.foot_position sobre el ROI real")
+        heatmap_card = Card(
+            "Mapa de calor de circulación",
+            "Punteado = ROI de personal (no son personas detectadas) · botón de la barra superior para verlo en grande",
+        )
         self.heatmap = HeatmapWidget()
         self.heatmap_empty = EmptyState("Sin muestras de posición aún (PositionSample vacío).")
         heatmap_card.body.addWidget(self.heatmap)
@@ -524,6 +541,37 @@ class DashboardTab(QWidget):
         self._current_zones = zones
 
     # ----------------------------------------------------------- acciones --
+    def _open_heatmap_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Mapa de calor de circulación")
+        dialog.resize(960, 660)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        caption = QLabel(
+            "Contorno sólido = zona de producto (ROI de góndola). Contorno punteado = "
+            "zona de personal — un área de rastreo definida en la pestaña 2 para excluir "
+            "empleados de las métricas de cliente, no una persona detectada por el sistema."
+        )
+        caption.setWordWrap(True)
+        caption.setObjectName("mutedText")
+        layout.addWidget(caption)
+
+        big_heatmap = HeatmapWidget()
+        zones = getattr(self, "_current_zones", [])
+        big_heatmap.set_data(self.store.get_position_samples(), zones)
+        layout.addWidget(big_heatmap, stretch=1)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        btn_close = QPushButton("Cerrar")
+        btn_close.clicked.connect(dialog.accept)
+        close_row.addWidget(btn_close)
+        layout.addLayout(close_row)
+
+        dialog.exec()
+
     def _on_seed_demo(self):
         zones = getattr(self, "_current_zones", [])
         if not zones:

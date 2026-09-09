@@ -44,6 +44,34 @@ def _create_gear_icon(size: int = 18, color: str = "#F2F0E6") -> QIcon:
     return QIcon(pixmap)
 
 
+def create_heatmap_icon(size: int = 18) -> QIcon:
+    """
+    Ícono de "mapa de calor": cuadrícula 3x3 con un degradado frío -> cálido
+    hacia el centro, para el botón que abre la vista grande del heatmap
+    (mismo criterio que `_create_gear_icon`: vectorial, no emoji).
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+
+    cells = 3
+    cell = size / cells
+    heat_hex = [
+        ["#3B2A78", "#8C3D6B", "#3B2A78"],
+        ["#8C3D6B", "#F2A93B", "#8C3D6B"],
+        ["#2A2560", "#8C3D6B", "#2A2560"],
+    ]
+    for row in range(cells):
+        for col in range(cells):
+            painter.setBrush(QColor(heat_hex[row][col]))
+            painter.drawRoundedRect(QRectF(col * cell + 1, row * cell + 1, cell - 2, cell - 2), 2, 2)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
 class HeaderBar(QFrame):
     """Barra superior: nombre de la fuente activa + botón de settings"""
 
@@ -77,3 +105,13 @@ class HeaderBar(QFrame):
     def set_source_name(self, name: str):
         """Actualiza el texto de la fuente sin reconstruir el widget entero"""
         self.source_label.setText(name.upper())
+
+    def set_action(self, icon: QIcon, tooltip: str):
+        """
+        Reemplaza el ícono/tooltip del botón de la esquina (por defecto el
+        engranaje de "Configuración"). El botón sigue emitiendo la misma
+        señal `settings_clicked` — cada tab decide qué significa ese click
+        conectándose a ella; no todos los tabs necesitan un settings real.
+        """
+        self.btn_settings.setIcon(icon)
+        self.btn_settings.setToolTip(tooltip)
